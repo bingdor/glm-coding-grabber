@@ -1104,6 +1104,8 @@ function showHelpDialog() {
                 <span class="help-highlight">自动锁单</span>（左上角黄色复选框）：勾选后，preview成功时会直接调create-sign接口锁单，跳过扫码→pay-middle-page的延迟。锁单成功后弹出支付宝支付二维码，扫码即可直接订阅，无需担心售罄。
             </div>
             <div class="help-close">
+                <p style="color:#409eff;margin-bottom:4px;">QQ交流群: <strong>981656846</strong></p>
+                <p style="color:#e6a23c;font-size:12px;margin-bottom:12px;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=HX44VX6Q0S" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>
                 <button id="help-close-btn">我知道了</button>
             </div>
         </div>
