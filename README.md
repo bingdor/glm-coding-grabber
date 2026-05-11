@@ -164,17 +164,6 @@ curl http://127.0.0.1:9898/health
 - 能否抢到仍需运气，建议提前做好准备
 - 浏览器窗口高度不低于 900px，否则二维码可能无法正常显示
 
-## 交流与支持
-
-- **QQ 交流群**：欢迎加入交流抢购技巧和问题反馈
-- **官网 GLM Coding Plan 体验卡**：目前有多张可以赠送，需要的私~
-
-### 支持一下作者
-
-如果觉得脚本有用，欢迎用我的分享链接抢购，你有 **5% 优惠**，我也会获得一些邀请赠送额度，感谢支持！
-
-👉 [https://www.bigmodel.cn/glm-coding?ic=HX44VX6Q0S](https://www.bigmodel.cn/glm-coding?ic=HX44VX6Q0S)
-
 ## 文件结构
 
 ```
@@ -192,3 +181,8 @@ glm-coding-grabber/
     ├── requirements.txt  # Python 依赖
     └── readme.md         # 验证码服务详细说明
 ```
+### 支持一下作者
+
+如果觉得脚本有用，欢迎用我的分享链接抢购，你有 **5% 优惠**，我也会获得一些邀请赠送额度，感谢支持！
+
+👉 [点击拼模](https://www.bigmodel.cn/glm-coding?ic=HX44VX6Q0S)
