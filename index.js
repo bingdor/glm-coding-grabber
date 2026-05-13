@@ -2,7 +2,7 @@
 // @name         GLM抢号
 // @namespace    05info
 // @author       Spanky
-// @version      2.0.0
+// @version      2.0.1
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
 // @match        https://*.captcha.qcloud.com/*
@@ -1939,8 +1939,10 @@ function tryLockOrder() {
 
     console.log('[锁单] 发起create-sign, productId:', priceData.productId, 'bizId:', priceData.bizId);
 
+    var signUrl = priceData.lastSubscriptionSummary ? '/api/biz/pay/product/update/sign' : '/api/biz/pay/create-sign';
+
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/biz/pay/create-sign');
+    xhr.open('POST', signUrl);
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.onload = function() {
         lockOrderInProgress = false;
