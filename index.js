@@ -2205,7 +2205,7 @@ function init() {
     setupAPIInterceptor();
 
     createControlPanel();
-    createCaptchaPanel();
+    // createCaptchaPanel(); // 去掉这个按钮，有歧义
     loadQRLibrary();
     syncServerTime();
     scheduleNext();
