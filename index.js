@@ -342,6 +342,14 @@ function setupAPIInterceptor() {
             var testOverrideText = null;  // 测试模式假响应
             var vueModifiedText = null;   // 缓存：555→1505 转换后的响应
 
+            // ── 随机请求指纹 ──
+            try {
+                xhr.setRequestHeader('X-Request-Id', Math.random().toString(36).slice(2, 15));
+                xhr.setRequestHeader('X-Timestamp', String(Date.now()));
+                var _q = (0.5 + Math.random() * 0.5).toFixed(1);
+                xhr.setRequestHeader('Accept-Language', 'zh-CN,zh;q=' + _q + ',en;q=' + (_q * 0.7).toFixed(1));
+            } catch(e) {}
+
             // ── 测试模式：生成假响应 ──
             if (TEST_PREVIEW_COUNT > 0) {
                 if (typeof window.__testPreviewSeq === 'undefined') window.__testPreviewSeq = 0;
@@ -505,6 +513,13 @@ function sendPreviewRequest(body, headers) {
                 try { xhr.setRequestHeader(name, headers[name]); } catch(e) {}
             }
         }
+        // 随机请求指纹 — 每次请求看起来不同，降低被识别为脚本的概率
+        try {
+            xhr.setRequestHeader('X-Request-Id', Math.random().toString(36).slice(2, 15));
+            xhr.setRequestHeader('X-Timestamp', String(Date.now()));
+            var _q = (0.5 + Math.random() * 0.5).toFixed(1);
+            xhr.setRequestHeader('Accept-Language', 'zh-CN,zh;q=' + _q + ',en;q=' + (_q * 0.7).toFixed(1));
+        } catch(e) {}
         xhr.onload = function() {
             // HTTP 非 200（如 405）→ 服务器拒绝，验证码已失效
             if (xhr.status !== 200) {
