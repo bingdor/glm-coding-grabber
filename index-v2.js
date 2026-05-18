@@ -553,7 +553,7 @@
 
     // 展示锁单后的支付二维码
     function showPaymentQRPopup(signUrl, priceData) {
-        var amount = priceData.payAmount || priceData.thirdPartyAmount;
+        var amount = priceData.thirdPartyAmount || priceData.payAmount;
         var productName = priceData.productName || '';
 
         // @require 加载的 QRCode 在油猴沙箱全局，不在 unsafeWindow 上
@@ -1388,7 +1388,7 @@
         if (!state.running) return null;
 
         if (resp.code === 200) {
-            if (resp.data && !resp.data.soldOut) {
+             if (resp.data && !resp.data.soldOut) {
                 tokenObj.previewResult = { success: true, soldOut: false, code: 200, raw: resp };
                 updateTokenDisplay();
                 // 附带 captcha 信息，供触发 Vue 原生支付弹窗使用

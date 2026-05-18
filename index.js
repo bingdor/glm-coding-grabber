@@ -2033,8 +2033,57 @@ function onLockOrderFailed(msg) {
     }
 }
 
+function showQRPopup(qrDataUrl, amount, productName, subtitle, payUrl, large) {
+    var existing = document.getElementById('v1-pay-popup');
+    if (existing) existing.remove();
+    var existingOverlay = document.getElementById('v1-pay-overlay');
+    if (existingOverlay) existingOverlay.remove();
+
+    var qrSize = large ? 350 : 240;
+    var popupWidth = large ? 490 : 440;
+
+    var popup = document.createElement('div');
+    popup.id = 'v1-pay-popup';
+    popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+        'background:#fff;border-radius:12px;padding:28px 32px;z-index:999999;min-width:340px;max-width:' + popupWidth + 'px;' +
+        'box-shadow:0 8px 30px rgba(0,0,0,0.25);text-align:center;font-family:system-ui,sans-serif;';
+    popup.innerHTML =
+        '<div style="font-size:18px;font-weight:600;color:#333;margin-bottom:8px;">抢购成功！请扫码支付</div>' +
+        '<div style="font-size:14px;color:#666;margin-bottom:4px;">' + (productName || '') + '</div>' +
+        '<div style="font-size:28px;font-weight:bold;color:#e6a23c;margin-bottom:16px;">¥' + amount + '</div>' +
+        '<div style="margin-bottom:12px;"><img src="' + qrDataUrl + '" style="width:' + qrSize + 'px;height:' + qrSize + 'px;border:1px solid #eee;border-radius:8px;" /></div>' +
+        '<div style="font-size:12px;color:#999;margin-bottom:8px;">' + (subtitle || '请尽快用支付宝扫码支付') + '</div>' +
+        (payUrl ? '<textarea readonly onclick="this.select()" style="width:100%;max-width:360px;height:48px;font-size:11px;color:#409eff;border:1px solid #ddd;border-radius:4px;padding:4px 6px;resize:none;margin-bottom:16px;word-break:break-all;line-height:1.3;outline:none;cursor:pointer;">' + payUrl + '</textarea>' : '') +
+        '<div style="display:flex;gap:10px;justify-content:center;margin-top:12px;">' +
+        '<button id="v1-pay-download" style="background:#67c23a;color:#fff;border:none;border-radius:6px;' +
+        'padding:8px 20px;font-size:14px;cursor:pointer;">下载二维码</button>' +
+        '<button id="v1-pay-close" style="background:#409eff;color:#fff;border:none;border-radius:6px;' +
+        'padding:8px 28px;font-size:14px;cursor:pointer;">关闭</button></div>';
+    document.body.appendChild(popup);
+
+    var overlay = document.createElement('div');
+    overlay.id = 'v1-pay-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:999998;';
+    document.body.appendChild(overlay);
+
+    var closePopup = function () { popup.remove(); overlay.remove(); };
+    document.getElementById('v1-pay-close').onclick = closePopup;
+    overlay.onclick = null;
+
+    var dlBtn = document.getElementById('v1-pay-download');
+    if (dlBtn) {
+        dlBtn.onclick = function () {
+            var a = document.createElement('a');
+            a.href = qrDataUrl;
+            a.download = 'pay_qr_' + Date.now() + '.png';
+            a.click();
+        };
+    }
+}
+
 function showPaymentQRPopup(signUrl, priceData) {
-    var amount = priceData.payAmount || priceData.thirdPartyAmount;
+    var amount = priceData.thirdPartyAmount || priceData.payAmount;
+    var productName = priceData.productName || '';
 
     function renderQR() {
         win.QRCode.toDataURL(signUrl, { width: 600, margin: 4, errorCorrectionLevel: 'L' }, function(err, qrDataUrl) {
@@ -2043,25 +2092,35 @@ function showPaymentQRPopup(signUrl, priceData) {
                 win.vueApp?.$message({ message: 'QR生成失败', type: 'error', duration: 5000 });
                 return;
             }
-            var newWin = window.open('', '_blank');
-            if (newWin) {
-                newWin.document.write(
-                    '<html><head><title>支付宝扫码支付</title><style>' +
-                    'body{display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5;}' +
-                    'img{width:min(500px,90vmin);height:min(500px,90vmin);aspect-ratio:1/1;}' +
-                    'h2{color:#333;}.price{color:#e6a23c;font-size:28px;font-weight:bold;}' +
-                    '.tip{color:#999;font-size:14px;margin-top:12px;}' +
-                    '</style></head>' +
-                    '<body><div style="text-align:center;">' +
-                    '<h2>锁单成功！请用支付宝扫码</h2>' +
-                    '<p class="price">&yen;' + amount + '</p>' +
-                    '<img src="' + qrDataUrl + '" />' +
-                    '<p class="tip">请尽量靠近屏幕扫码</p>' +
-                    '</div></body></html>'
-                );
-                newWin.document.close();
-            }
-            console.log('[锁单] 支付二维码已在新窗口打开');
+            // 页面内弹窗
+            showQRPopup(qrDataUrl, amount, productName, '锁单成功！请用支付宝扫码支付', signUrl, true);
+            // 自动下载二维码
+            var a = document.createElement('a');
+            a.href = qrDataUrl;
+            a.download = 'pay_qr_' + Date.now() + '.png';
+            a.click();
+            // window.open 打开包含二维码的页面，多 tab 时方便识别哪个成功
+            try {
+                var w = window.open('', '_blank');
+                if (w) {
+                    w.document.write(
+                        '<html><head><title>锁单成功 - 支付宝扫码支付</title><style>' +
+                        'body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f5;}' +
+                        'img{width:350px;height:350px;border:2px solid #eee;border-radius:8px;}' +
+                        'h2{color:#333;}.price{color:#e6a23c;font-size:28px;font-weight:bold;}' +
+                        '.tip{color:#999;font-size:14px;margin-top:12px;}' +
+                        '</style></head>' +
+                        '<body><div style="text-align:center;">' +
+                        '<h2>锁单成功！请用支付宝扫码</h2>' +
+                        '<p class="price">&yen;' + amount + (productName ? ' - ' + productName : '') + '</p>' +
+                        '<img src="' + qrDataUrl + '" />' +
+                        '<p class="tip">请尽快用支付宝扫码支付</p>' +
+                        '</div></body></html>'
+                    );
+                    w.document.close();
+                }
+            } catch (e) {}
+            console.log('[锁单] 支付二维码已弹出');
         });
     }
 
