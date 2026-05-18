@@ -41,10 +41,6 @@
     // ==================== 验证码自动解题（iframe 内运行） ====================
     function initCaptchaSolver() {
         var CLICK_OCR_URL = 'http://127.0.0.1:9898/click';
-        var TTSHITU_URL = 'https://api.ttshitu.com/predict';
-        var TTSHITU_USER = '819062398';
-        var TTSHITU_PASS = 'Spanky123';
-
 
         function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
         function log(msg) { console.log('%c[CaptchaSolver] ' + msg, 'color:#58a6ff'); }
@@ -94,31 +90,6 @@
             }).then(function (r) { return r.json(); });
         }
 
-        function callTtshitu(imgData, text) {
-            var base64 = imgData.replace(/^data:image\/\w+;base64,/, '');
-            var body = JSON.stringify({
-                username: TTSHITU_USER, password: TTSHITU_PASS,
-                image: base64, typeid: 27, remark: text
-            });
-            if (typeof GM_xmlhttpRequest !== 'undefined') {
-                return new Promise(function (resolve, reject) {
-                    GM_xmlhttpRequest({
-                        method: 'POST', url: TTSHITU_URL,
-                        headers: { 'Content-Type': 'application/json' },
-                        data: body,
-                        onload: function (r) {
-                            try { resolve(JSON.parse(r.responseText)); }
-                            catch (e) { reject(new Error('图鉴响应解析失败')); }
-                        },
-                        onerror: function () { reject(new Error('图鉴连接失败')); }
-                    });
-                });
-            }
-            return fetch(TTSHITU_URL, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body
-            }).then(function (r) { return r.json(); });
-        }
-
         async function ocrRecognize(imgData, text) {
             try {
                 var resp = await callClickOcr(imgData, text);
@@ -130,15 +101,6 @@
                     });
                 }
             } catch (e) { log('ddddocr 失败: ' + e.message); }
-            try {
-                var resp2 = await callTtshitu(imgData, text);
-                if (resp2.code === 0 && resp2.data && resp2.data.result) {
-                    return resp2.data.result.split(',').map(function (p) {
-                        var xy = p.split('|');
-                        return { x: parseInt(xy[0], 10), y: parseInt(xy[1], 10) };
-                    });
-                }
-            } catch (e) { log('图鉴失败: ' + e.message); }
             return [];
         }
 
@@ -349,14 +311,11 @@
         CAPTCHA_APP_ID: '196026326',
         OCR_BACKEND: 'ddddocr',
         DDDDOCR_URL: 'http://127.0.0.1:9898/click',
-        TTSHITU_USERNAME: '819062398',
-        TTSHITU_PASSWORD: 'Spanky123',
-        TTSHITU_TYPEID: 27,
         CAPTCHA_MAX_RETRY: 10,
         RETRY_ON_BUSY: 3,
         RETRY_INTERVAL: 300,
-        // 每轮流水线解几个验证码（解一个立即发 preview，不等结果）
-        CONCURRENT_ATTEMPTS: 3,
+        // 预存 token 之间 preview 请求间隔（ms）
+        PRECACHE_INTERVAL: 1800,
         ENABLE_MANUAL_BIZID: false
     };
 
@@ -367,6 +326,7 @@
         captchaHandling: false,
         userInfo: null,
         customerNumber: null,
+        customerName: '',
         cachedTokens: [],
         lockOrderDone: false,
         lockOrderInProgress: false,
@@ -442,6 +402,24 @@
     }
 
     var TOKEN_MAX_AGE = 180000;
+
+    // ==================== 持久化存储（GM 优先，fallback localStorage） ====================
+    function saveSetting(key, value) {
+        console.log('[v2-storage] save', key, '=', value, '| GM_setValue?', typeof GM_setValue !== 'undefined');
+        try { if (typeof GM_setValue !== 'undefined') GM_setValue(key, value); } catch (e) { console.warn('[v2-storage] GM_setValue fail', key, e); }
+        try { localStorage.setItem(key, String(value)); } catch (e) { console.warn('[v2-storage] localStorage.setItem fail', key, e); }
+    }
+    function loadSetting(key, defaultVal) {
+        var val = null;
+        var gmVal = null;
+        var lsVal = null;
+        try { if (typeof GM_getValue !== 'undefined') gmVal = GM_getValue(key); } catch (e) {}
+        try { lsVal = localStorage.getItem(key); } catch (e) {}
+        val = (gmVal !== null && gmVal !== undefined) ? gmVal : lsVal;
+        var result = (val !== null && val !== undefined) ? val : defaultVal;
+        console.log('[v2-storage] load', key, '| GM=', gmVal, '| LS=', lsVal, '| default=', defaultVal, '→ result=', result);
+        return result;
+    }
 
     // ==================== 工具函数 ====================
     function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -576,14 +554,14 @@
     // 展示锁单后的支付二维码
     function showPaymentQRPopup(signUrl, priceData) {
         var amount = priceData.payAmount || priceData.thirdPartyAmount;
+        var productName = priceData.productName || '';
 
         // @require 加载的 QRCode 在油猴沙箱全局，不在 unsafeWindow 上
         var QR = (typeof QRCode !== 'undefined') ? QRCode
             : (typeof win.QRCode !== 'undefined') ? win.QRCode : null;
 
         if (!QR) {
-            log('支付', 'QRCode 库未就绪，回退到官方二维码');
-            generatePayQRCode(priceData, { name: '' });
+            log('支付', 'QRCode 库未就绪');
             return;
         }
 
@@ -592,27 +570,28 @@
         }, function (err, qrDataUrl) {
             if (err) {
                 log('支付', 'QR生成失败: ' + err.message);
-                generatePayQRCode(priceData, { name: '' });
                 return;
             }
-            var newWin = window.open('', '_blank');
-            if (newWin) {
-                newWin.document.write(
-                    '<html><head><title>支付宝扫码支付</title><style>' +
-                    'body{display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5;}' +
-                    'img{width:min(500px,90vmin);height:min(500px,90vmin);aspect-ratio:1/1;}' +
-                    'h2{color:#333;}.price{color:#e6a23c;font-size:28px;font-weight:bold;}' +
-                    '.tip{color:#999;font-size:14px;margin-top:12px;}' +
-                    '</style></head>' +
-                    '<body><div style="text-align:center;">' +
-                    '<h2>锁单成功！请用支付宝扫码</h2>' +
-                    '<p class="price">&yen;' + amount + '</p>' +
-                    '<img src="' + qrDataUrl + '" />' +
-                    '<p class="tip">请尽量靠近屏幕扫码</p>' +
-                    '</div></body></html>'
-                );
-            }
-            log('支付', '锁单二维码已打开');
+            showQRPopup(qrDataUrl, amount, productName, '锁单成功！请用支付宝扫码支付', signUrl, true);
+            // 自动下载二维码
+            var a = document.createElement('a');
+            a.href = qrDataUrl;
+            a.download = 'pay_qr_' + Date.now() + '.png';
+            a.click();
+            // window.open 打开包含二维码的页面，多 tab 时方便识别哪个成功
+            try {
+                var w = window.open('', '_blank');
+                if (w) {
+                    w.document.write('<html><head><title>抢购成功 - 请扫码支付</title></head><body style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;font-family:system-ui,sans-serif;background:#f5f5f5;">' +
+                        '<h2 style="color:#333;">抢购成功！请扫码支付</h2>' +
+                        '<p style="color:#666;">' + (productName || '') + '　<strong style="color:#e6a23c;font-size:24px;">¥' + amount + '</strong></p>' +
+                        '<img src="' + qrDataUrl + '" style="width:350px;height:350px;border:2px solid #eee;border-radius:8px;" />' +
+                        '<p style="color:#999;font-size:13px;margin-top:12px;">请尽快用支付宝扫码支付</p>' +
+                        '</body></html>');
+                    w.document.close();
+                }
+            } catch (e) {}
+            log('支付', '支付二维码已弹出');
         });
     }
     win.showPaymentQRPopup = showPaymentQRPopup;
@@ -659,10 +638,6 @@
     function ddddocrRecognize(base64, chars) {
         return new Promise(function (resolve, reject) {
             var payload = JSON.stringify({ image: base64, remark: chars });
-            var fallback = function (reason) {
-                console.warn('[ddddocr] 失败，降级到图鉴: ' + reason);
-                ttshituRecognize(base64, chars).then(resolve).catch(reject);
-            };
             var handleRes = function (text) {
                 try {
                     var obj = JSON.parse(text);
@@ -673,9 +648,9 @@
                         });
                         resolve({ id: obj.data.id || '', points: points });
                     } else {
-                        fallback(text);
+                        reject(new Error('ddddocr fail: ' + text));
                     }
-                } catch (e) { fallback(e.message); }
+                } catch (e) { reject(e); }
             };
             if (typeof GM_xmlhttpRequest !== 'undefined') {
                 GM_xmlhttpRequest({
@@ -684,10 +659,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     data: payload,
                     onload: function (res) { handleRes(res.responseText); },
-                    onerror: function () {
-                        console.warn('[ddddocr] 不可用，降级到图鉴');
-                        ttshituRecognize(base64, chars).then(resolve).catch(reject);
-                    }
+                    onerror: function () { reject(new Error('ddddocr 服务不可用')); }
                 });
             } else {
                 fetch(CONFIG.DDDDOCR_URL, {
@@ -695,59 +667,14 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: payload
                 }).then(function (r) { return r.text(); }).then(handleRes).catch(function () {
-                    ttshituRecognize(base64, chars).then(resolve).catch(reject);
+                    reject(new Error('ddddocr 服务不可用'));
                 });
-            }
-        });
-    }
-
-    function ttshituRecognize(base64, chars) {
-        return new Promise(function (resolve, reject) {
-            var payload = JSON.stringify({
-                username: CONFIG.TTSHITU_USERNAME,
-                password: CONFIG.TTSHITU_PASSWORD,
-                typeid: CONFIG.TTSHITU_TYPEID,
-                image: base64,
-                remark: chars
-            });
-            var handleRes = function (text) {
-                try {
-                    var obj = JSON.parse(text);
-                    if (obj.success && obj.data && obj.data.result) {
-                        var points = obj.data.result.split('|').map(function (p) {
-                            var xy = p.split(',');
-                            return { x: parseFloat(xy[0]), y: parseFloat(xy[1]) };
-                        });
-                        resolve({ id: obj.data.id, points: points });
-                    } else {
-                        reject(new Error('ttshitu fail: ' + text));
-                    }
-                } catch (e) { reject(e); }
-            };
-            if (typeof GM_xmlhttpRequest !== 'undefined') {
-                GM_xmlhttpRequest({
-                    method: 'POST',
-                    url: 'http://api.ttshitu.com/predict',
-                    headers: { 'Content-Type': 'application/json' },
-                    data: payload,
-                    onload: function (res) { handleRes(res.responseText); },
-                    onerror: reject
-                });
-            } else {
-                fetch('http://api.ttshitu.com/predict', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: payload
-                }).then(function (r) { return r.text(); }).then(handleRes).catch(reject);
             }
         });
     }
 
     function recognizeCaptcha(base64, chars) {
-        if (CONFIG.OCR_BACKEND === 'ddddocr') {
-            return ddddocrRecognize(base64, chars);
-        }
-        return ttshituRecognize(base64, chars);
+        return ddddocrRecognize(base64, chars);
     }
 
     // ==================== 腾讯验证码交互 ====================
@@ -1171,23 +1098,148 @@
         return el ? el.value.trim() : '';
     }
 
-    // ==================== 触发 Vue 原生支付弹窗 ====================
-    function triggerVuePayDialog(previewData) {
+    // ==================== 锁单失败后处理 ====================
+    var PAY_AES_KEY = 'zhiPuAi123456789';
+
+    function findCryptoJS() {
+        // @require 在油猴沙箱里加载，变量名可能被隔离
+        // 尝试多种方式查找
+        var candidates = [];
+        try { candidates.push(CryptoJS); } catch (e) {}
+        try { candidates.push(win.CryptoJS); } catch (e) {}
+        try { candidates.push(window.CryptoJS); } catch (e) {}
+        try { candidates.push(unsafeWindow.CryptoJS); } catch (e) {}
+        // 尝试通过 GM 信息脚本的全局
+        try { candidates.push(self.CryptoJS); } catch (e) {}
+        for (var i = 0; i < candidates.length; i++) {
+            if (candidates[i] && candidates[i].AES && candidates[i].enc) {
+                return candidates[i];
+            }
+        }
+        return null;
+    }
+
+    function aesEncrypt(plaintext) {
+        var CryptoJS = findCryptoJS();
+        if (!CryptoJS) {
+            log('支付', 'CryptoJS 未找到，尝试内联加载...');
+            return null;
+        }
+        var key = CryptoJS.enc.Utf8.parse(PAY_AES_KEY);
+        var encrypted = CryptoJS.AES.encrypt(plaintext, key, {
+            mode: CryptoJS.mode.ECB,
+            padding: CryptoJS.pad.Pkcs7
+        });
+        return encrypted.toString();
+    }
+
+    function buildPayMiddlePageUrl(previewData) {
+        // 参考 SubscribePay.vue renderQrCode 方法：
+        // info = { productId, productName, amount, customerId, customerName, bizId, ic, payType }
+        // pay-middle-page 打开后会拿这些参数调 create-sign
+        var info = {
+            productId: previewData.productId,
+            productName: previewData.productName || previewData.productBigTitle || '',
+            amount: previewData.payAmount || previewData.thirdPartyAmount || 0,
+            customerId: state.customerNumber || '',
+            customerName: state.customerName || '',
+            bizId: previewData.bizId || '',
+            ic: getQueryString('ic') || CONFIG.INVITATION_CODE,
+            payType: 'alipay'
+        };
+        var jsonStr = JSON.stringify(info);
+        var encrypted = aesEncrypt(jsonStr);
+        if (!encrypted) return null;
+        return window.location.origin + '/pay-middle-page?info=' + encodeURIComponent(encrypted);
+    }
+
+    function showQRPopup(qrDataUrl, amount, productName, subtitle, payUrl, large) {
+        var existing = document.getElementById('v2-lockfail-popup');
+        if (existing) existing.remove();
+        var existingOverlay = document.getElementById('v2-lockfail-overlay');
+        if (existingOverlay) existingOverlay.remove();
+
+        var qrSize = large ? 350 : 240;
+        var popupWidth = large ? 490 : 440;
+
+        var popup = document.createElement('div');
+        popup.id = 'v2-lockfail-popup';
+        popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+            'background:#fff;border-radius:12px;padding:28px 32px;z-index:999999;min-width:340px;max-width:' + popupWidth + 'px;' +
+            'box-shadow:0 8px 30px rgba(0,0,0,0.25);text-align:center;font-family:system-ui,sans-serif;';
+        popup.innerHTML =
+            '<div style="font-size:18px;font-weight:600;color:#333;margin-bottom:8px;">抢购成功！请扫码支付</div>' +
+            '<div style="font-size:14px;color:#666;margin-bottom:4px;">' + (productName || '') + '</div>' +
+            '<div style="font-size:28px;font-weight:bold;color:#e6a23c;margin-bottom:16px;">¥' + amount + '</div>' +
+            '<div style="margin-bottom:12px;"><img src="' + qrDataUrl + '" style="width:' + qrSize + 'px;height:' + qrSize + 'px;border:1px solid #eee;border-radius:8px;" /></div>' +
+            '<div style="font-size:12px;color:#999;margin-bottom:8px;">' + (subtitle || '请尽快用支付宝扫码支付') + '</div>' +
+            (payUrl ? '<textarea readonly onclick="this.select()" style="width:100%;max-width:360px;height:48px;font-size:11px;color:#409eff;border:1px solid #ddd;border-radius:4px;padding:4px 6px;resize:none;margin-bottom:16px;word-break:break-all;line-height:1.3;outline:none;cursor:pointer;">' + payUrl + '</textarea>' : '') +
+            '<div style="display:flex;gap:10px;justify-content:center;margin-top:12px;">' +
+            '<button id="v2-lockfail-download" style="background:#67c23a;color:#fff;border:none;border-radius:6px;' +
+            'padding:8px 20px;font-size:14px;cursor:pointer;">下载二维码</button>' +
+            '<button id="v2-lockfail-close" style="background:#409eff;color:#fff;border:none;border-radius:6px;' +
+            'padding:8px 28px;font-size:14px;cursor:pointer;">关闭</button></div>';
+        document.body.appendChild(popup);
+
+        var overlay = document.createElement('div');
+        overlay.id = 'v2-lockfail-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:999998;';
+        document.body.appendChild(overlay);
+
+        var closePopup = function () { popup.remove(); overlay.remove(); };
+        document.getElementById('v2-lockfail-close').onclick = closePopup;
+        overlay.onclick = null;
+
+        var dlBtn = document.getElementById('v2-lockfail-download');
+        if (dlBtn) {
+            dlBtn.onclick = function () {
+                var a = document.createElement('a');
+                a.href = qrDataUrl;
+                a.download = 'pay_qr_' + Date.now() + '.png';
+                a.click();
+            };
+        }
+    }
+
+    async function openPaymentDialog(previewData, product) {
+        // 关闭残留验证码
         try {
-            var payRef = win.vueApp && win.vueApp.$refs && win.vueApp.$refs.payComponentRef;
-            if (!payRef) {
-                log('支付', 'Vue payRef 未找到，仅使用自定义弹窗');
+            var captchaClose = document.querySelector('.tencent-captcha-dy__close-btn') ||
+                document.querySelector('#tcaptcha_transform_dy .close-btn');
+            if (captchaClose) captchaClose.click();
+        } catch (e) {}
+
+        // 构建 pay-middle-page URL 并用 QRCode 库生成二维码
+        var payUrl = buildPayMiddlePageUrl(previewData);
+        if (!payUrl) {
+            log('支付', '构建支付 URL 失败');
+            return false;
+        }
+
+        log('支付', '支付URL: ' + payUrl);
+
+        var QR = (typeof QRCode !== 'undefined') ? QRCode
+            : (typeof win.QRCode !== 'undefined') ? win.QRCode : null;
+        if (!QR) {
+            log('支付', 'QRCode 库未就绪');
+            return false;
+        }
+
+        var amount = previewData.thirdPartyAmount || previewData.payAmount || 0;
+        var productName = previewData.productName || '';
+
+        QR.toDataURL(payUrl, {
+            width: 600, margin: 4, errorCorrectionLevel: 'L'
+        }, function (err, qrDataUrl) {
+            if (err) {
+                log('支付', 'QR生成失败: ' + err.message);
                 return;
             }
-            payRef.isServerBusy = false;
-            payRef.isSoldOut = false;
-            payRef.captchaVerified = true;
-            setTimeout(function () { payRef.priceData = previewData; }, 100);
-            try { payRef.getPayStatusFn(); } catch (e) {}
-            log('支付', '已触发 Vue 原生支付弹窗');
-        } catch (e) {
-            log('支付', '触发 Vue 弹窗失败: ' + e.message);
-        }
+            showQRPopup(qrDataUrl, amount, productName, '锁单失败，扫码后页面会自动请求锁单', payUrl);
+            log('支付', '支付二维码已弹出');
+        });
+
+        return true;
     }
 
     // ==================== 截取官方 canvas 二维码 ====================
@@ -1195,10 +1247,8 @@
         log('支付', '支付金额: ¥' + previewData.thirdPartyAmount);
         log('支付', 'bizId: ' + previewData.bizId);
 
-        // 触发 Vue 原生支付弹窗，等待官方二维码 canvas 渲染
-        triggerVuePayDialog(previewData);
-
-        // 轮询等待 canvas 渲染完成
+        // 注意：generatePayQRCode 仅作为 QR 库不可用时的截图回退
+        // 轮询等待 canvas 渲染完成（payPreviewFn 已在上层调用）
         var qrCanvas = null;
         for (var i = 0; i < 50; i++) {
             await sleep(200);
@@ -1341,6 +1391,9 @@
             if (resp.data && !resp.data.soldOut) {
                 tokenObj.previewResult = { success: true, soldOut: false, code: 200, raw: resp };
                 updateTokenDisplay();
+                // 附带 captcha 信息，供触发 Vue 原生支付弹窗使用
+                resp.data._captchaTicket = captchaResult.ticket;
+                resp.data._captchaRandstr = captchaResult.randstr;
                 return resp.data;
             }
             tokenObj.previewResult = { success: false, soldOut: true, code: 200, raw: resp };
@@ -1354,7 +1407,7 @@
 
     // 流水线：解验证码 → await preview → 成功立即返回，失败继续下一个
     async function solveAndFirePipeline(product) {
-        for (var i = 0; i < CONFIG.CONCURRENT_ATTEMPTS && state.running; i++) {
+        for (var i = 0; i < 3 && state.running; i++) {
             try {
                 log('线路' + (i + 1), '弹出验证码...');
                 var captchaResult = await getCaptchaTicket();
@@ -1424,7 +1477,9 @@
             manualTokenObj.lockResult = { success: false, raw: manualLockResult.raw };
             state.cachedTokens.push(manualTokenObj);
             updateTokenDisplay();
-            log('直通', '锁单失败: ' + (manualLockResult.msg || manualLockResult.code) + '，继续正常流程');
+            log('直通', '锁单失败: ' + (manualLockResult.msg || manualLockResult.code) + '，触发原生弹窗');
+            await openPaymentDialog(manualPreviewData, product);
+            return true;
         }
 
         // Phase 1: 用预存 token 逐个请求（避免并发触发服务端繁忙）
@@ -1458,12 +1513,14 @@
                         showPaymentQRPopup(lockResult.sign, previewData);
                         return true;
                     }
-                    await generatePayQRCode(previewData, product);
+                    // 锁单失败，直接弹出页面原生支付弹窗
+                    log('抢购', '锁单失败，触发页面原生支付弹窗');
+                    await openPaymentDialog(previewData, product);
                     return true;
                 }
 
                 if (i < cachedTokens.length - 1) {
-                    await sleep(1800);
+                    await sleep(CONFIG.PRECACHE_INTERVAL);
                 }
             }
             log('抢购', '预存token全部失败，进入普通抢购');
@@ -1492,8 +1549,9 @@
                     showPaymentQRPopup(lockResult.sign, data);
                     return true;
                 }
-                // 锁单失败，走官方二维码
-                await generatePayQRCode(data, product);
+                // 锁单失败，直接弹出页面原生支付弹窗
+                log('抢购', '锁单失败，触发页面原生支付弹窗');
+                await openPaymentDialog(data, product);
                 return true;
             }
 
@@ -1622,7 +1680,7 @@
     function checkLocalOcrService() {
         var baseUrl = CONFIG.DDDDOCR_URL.replace(/\/click$/, '/');
         var onError = function () {
-            log('OCR', '本地服务未启动，将降级到图鉴云服务');
+            log('OCR', '本地服务未启动，请先启动 captcha/ddddocr_server.py');
         };
         var onSuccess = function () {
             log('OCR', '本地识别服务已连接');
@@ -1646,15 +1704,23 @@
         var panel = document.createElement('div');
         panel.id = 'v2-control-panel';
 
-        var savedTime = localStorage.getItem('v2_buy_time') || CONFIG.BUY_TIME_DEFAULT;
-        var savedPkg = localStorage.getItem('v2_package') || CONFIG.PACKAGE_TYPE_DEFAULT;
-        var savedTier = localStorage.getItem('v2_tier') || CONFIG.TIER_DEFAULT;
+        var savedTime = loadSetting('v2_buy_time', CONFIG.BUY_TIME_DEFAULT);
+        var savedPkg = loadSetting('v2_package', CONFIG.PACKAGE_TYPE_DEFAULT);
+        var savedTier = loadSetting('v2_tier', CONFIG.TIER_DEFAULT);
+        var savedInterval = loadSetting('v2_precache_interval', String(CONFIG.PRECACHE_INTERVAL));
+        var savedPrecacheCount = loadSetting('v2_precache_count', '5');
+        var savedAutoPrecache = loadSetting('v2_auto_precache', 'true');
+        var savedShowLog = loadSetting('v2_show_log', 'false');
+
+        // 恢复 CONFIG
+        CONFIG.PRECACHE_INTERVAL = parseInt(savedInterval, 10) || 1800;
 
         panel.innerHTML =
             '<div class="v2-panel-row">' +
             '<div class="v2-status-dot" id="v2-status-dot"></div>' +
             '<span id="v2-status-text">就绪</span>' +
             '<span id="v2-time-offset" style="color:#67c23a;font-size:10px;margin-left:auto;"></span>' +
+            '<button id="v2-help-btn" class="v2-btn-mini" style="margin-left:4px;">说明</button>' +
             '</div>' +
             '<div class="v2-panel-row">' +
             '<span class="v2-label">套餐</span>' +
@@ -1677,11 +1743,6 @@
             '<input type="time" id="v2-buy-time" step="1" value="' + savedTime + '">' +
             '</div>' +
             '<div class="v2-panel-row">' +
-            '<span class="v2-label">并发</span>' +
-            '<input type="number" id="v2-concurrency" min="1" max="5" value="' + CONFIG.CONCURRENT_ATTEMPTS + '" class="v2-num-input">' +
-            '<span class="v2-hint">个验证码/轮</span>' +
-            '</div>' +
-            '<div class="v2-panel-row">' +
             '<span class="v2-label">产品</span>' +
             '<span id="v2-product-info" class="v2-product-info"></span>' +
             '<button id="v2-refresh-btn" class="v2-btn-mini">刷新</button>' +
@@ -1694,12 +1755,17 @@
             '</div>' +
             '<div class="v2-separator"></div>' +
             '<div class="v2-panel-row v2-precache-row">' +
-            '<span class="v2-label">预存</span>' +
-            '<input type="number" id="v2-precache-count" min="1" max="10" value="5" class="v2-num-input">' +
+            '<span class="v2-label" style="width:50px;">预存<button id="v2-precache-help" class="v2-help-btn" title="预存说明">?</button></span>' +
+            '<input type="number" id="v2-precache-count" min="1" max="10" value="' + savedPrecacheCount + '" class="v2-num-input">' +
             '<span class="v2-hint">个</span>' +
             '<span id="v2-token-count" class="v2-token-count">0/0</span>' +
-            '<button id="v2-precache-btn" class="v2-btn v2-btn-secondary">预存</button>' +
+            '<button id="v2-precache-btn" class="v2-btn-mini">预存</button>' +
             '<button id="v2-clear-tokens-btn" class="v2-btn-mini">清空</button>' +
+            '</div>' +
+            '<div class="v2-panel-row">' +
+            '<span class="v2-label">间隔</span>' +
+            '<input type="number" id="v2-precache-interval" min="0" value="' + savedInterval + '" class="v2-num-input" style="width:52px;">' +
+            '<span class="v2-hint">ms(预存消耗间隔)</span>' +
             '</div>' +
             '<table class="v2-token-table" id="v2-token-table">' +
             '<thead><tr><th>#</th><th>ticket</th><th>时间</th><th>preview</th><th>锁单</th></tr></thead>' +
@@ -1707,11 +1773,11 @@
             '</table>' +
             '<div class="v2-panel-row">' +
             '<label class="v2-checkbox-label">' +
-            '<input type="checkbox" id="v2-auto-precache" checked />' +
+            '<input type="checkbox" id="v2-auto-precache"' + (savedAutoPrecache !== 'false' ? ' checked' : '') + ' />' +
             '自动预存(倒计时&lt;60s)' +
             '</label>' +
             '<label class="v2-checkbox-label">' +
-            '<input type="checkbox" id="v2-show-log" />' +
+            '<input type="checkbox" id="v2-show-log"' + (savedShowLog === 'true' ? ' checked' : '') + ' />' +
             '日志' +
             '</label>' +
             '</div>' +
@@ -1725,6 +1791,43 @@
             '<div class="v2-detail-box">' +
             '<div class="v2-detail-header"><span id="v2-detail-title">详情</span><button id="v2-detail-close">&times;</button></div>' +
             '<pre class="v2-detail-body" id="v2-detail-body"></pre>' +
+            '</div>' +
+            '</div>' +
+            '<div class="v2-help-overlay" id="v2-help-overlay" style="display:none;">' +
+            '<div class="v2-help-box">' +
+            '<h3>预存功能说明</h3>' +
+            '<p><span class="v2-help-highlight">什么是预存？</span><br/>' +
+            '预存是指在抢购倒计时结束前，提前完成验证码识别并缓存获得的 ticket 凭证。这样在正式抢购时可以直接使用缓存的凭证发起请求，跳过验证码识别环节，从而大幅减少延迟。</p>' +
+            '<p><span class="v2-help-step">工作流程：</span></p>' +
+            '<p>1. 手动点击"预存"或开启"自动预存"（倒计时 ≤ 60s 自动触发）<br/>' +
+            '2. 脚本自动弹出腾讯验证码并通过 OCR 识别完成验证<br/>' +
+            '3. 验证通过后获得 ticket + randstr，存入缓存（有效期 180 秒）<br/>' +
+            '4. 到达抢购时间时，脚本用缓存的 ticket 直接请求 preview 接口<br/>' +
+            '5. 每个预存 token 会独立请求 preview，命中即可锁单</p>' +
+            '<p><span class="v2-help-highlight">使用建议：</span><br/>' +
+            '- 预存 3~5 个即可，太多可能触发验证码频率限制<br/>' +
+            '- token 有效期 180 秒，预存过早会过期失效<br/>' +
+            '- 表格中可以看到每个 token 的 preview 和锁单结果</p>' +
+            '<p><span class="v2-help-highlight">请求间隔：</span><br/>' +
+            '面板中的"间隔"设置控制抢购时每个预存 token 发起 preview 请求之间的等待时间。默认 1800ms，间隔太短容易触发服务端繁忙（555），间隔太长则可能错过抢购窗口。建议根据网络状况调整，网络好可适当缩短。</p>' +
+            '<button class="v2-help-close" id="v2-help-close">知道了</button>' +
+            '</div>' +
+            '</div>' +
+            '<div class="v2-help-overlay" id="v2-main-help-overlay" style="display:none;">' +
+            '<div class="v2-help-box" style="max-width:460px;">' +
+            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.0</span></h3>' +
+            '<div class="v2-help-item"><span class="v2-help-num">1.</span>请<span class="v2-help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="v2-help-highlight">不要刷新</span>。选择套餐和档位，设置抢购时间，点击"开始抢购"即可到点自动抢购。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">4.</span>脚本原理是自动激活购买按钮并通过接口直接调用，不使用暴力手段。能否抢到仍需运气，祝您好运！</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">5.</span><span class="v2-help-highlight">锁单机制</span>：preview 成功后自动调 create-sign 接口锁单，锁住订单后弹出支付二维码。若锁单失败，会自动弹出页面原生支付弹窗供您扫码。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">6.</span><span class="v2-help-highlight">预存</span>：在抢购前提前解验证码缓存 ticket，到点直接用缓存请求。详情请点击预存旁的 <span style="color:#409eff;">?</span> 按钮。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">7.</span><span class="v2-help-highlight">间隔</span>：抢购时每个预存 token 发起 preview 请求之间的等待时间（ms），默认 1800，太快可能触发服务端繁忙。</div>' +
+            '<div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(0,0,0,0.08);text-align:center;">' +
+            '<p style="color:#409eff;margin-bottom:4px;font-size:12px;">QQ交流群: <strong>981656846</strong></p>' +
+            '<p style="color:#e6a23c;font-size:11px;margin-bottom:0;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=HX44VX6Q0S" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>' +
+            '</div>' +
+            '<button class="v2-help-close" id="v2-main-help-close">我知道了</button>' +
             '</div>' +
             '</div>';
 
@@ -1745,10 +1848,13 @@
             }
         });
 
-        // 并发数
-        document.getElementById('v2-concurrency').addEventListener('change', function () {
+        // 预存间隔
+        document.getElementById('v2-precache-interval').addEventListener('input', function () {
             var val = parseInt(this.value, 10);
-            if (val >= 1 && val <= 5) CONFIG.CONCURRENT_ATTEMPTS = val;
+            if (val > 0) {
+                CONFIG.PRECACHE_INTERVAL = val;
+                saveSetting('v2_precache_interval', val);
+            }
         });
 
         // 预存按钮
@@ -1767,6 +1873,16 @@
             clearCachedTokens();
         });
 
+        // 预存数量
+        document.getElementById('v2-precache-count').addEventListener('input', function () {
+            saveSetting('v2_precache_count', this.value);
+        });
+
+        // 自动预存
+        document.getElementById('v2-auto-precache').addEventListener('change', function () {
+            saveSetting('v2_auto_precache', String(this.checked));
+        });
+
         // 日志 toggle
         document.getElementById('v2-show-log').addEventListener('change', function () {
             var el = document.getElementById('v2-log-area');
@@ -1775,6 +1891,7 @@
             } else {
                 el.classList.add('v2-log-hidden');
             }
+            saveSetting('v2_show_log', String(this.checked));
         });
 
         // 详情弹窗关闭
@@ -1782,6 +1899,29 @@
             document.getElementById('v2-detail-overlay').style.display = 'none';
         });
         document.getElementById('v2-detail-overlay').addEventListener('click', function (e) {
+            if (e.target === this) this.style.display = 'none';
+        });
+
+        // 预存帮助弹窗
+        document.getElementById('v2-precache-help').addEventListener('click', function (e) {
+            e.stopPropagation();
+            document.getElementById('v2-help-overlay').style.display = 'flex';
+        });
+        document.getElementById('v2-help-close').addEventListener('click', function () {
+            document.getElementById('v2-help-overlay').style.display = 'none';
+        });
+        document.getElementById('v2-help-overlay').addEventListener('click', function (e) {
+            if (e.target === this) this.style.display = 'none';
+        });
+
+        // 主说明弹窗
+        document.getElementById('v2-help-btn').addEventListener('click', function () {
+            document.getElementById('v2-main-help-overlay').style.display = 'flex';
+        });
+        document.getElementById('v2-main-help-close').addEventListener('click', function () {
+            document.getElementById('v2-main-help-overlay').style.display = 'none';
+        });
+        document.getElementById('v2-main-help-overlay').addEventListener('click', function (e) {
             if (e.target === this) this.style.display = 'none';
         });
 
@@ -1824,11 +1964,11 @@
 
         // 保存设置
         document.getElementById('v2-buy-time').addEventListener('change', function () {
-            localStorage.setItem('v2_buy_time', this.value);
+            saveSetting('v2_buy_time', this.value);
         });
         document.querySelectorAll('input[name="v2-package"]').forEach(function (r) {
             r.addEventListener('change', function () {
-                localStorage.setItem('v2_package', this.value);
+                saveSetting('v2_package', this.value);
                 updateProductInfo();
                 clickPagePackageTab();
                 highlightPackageTab();
@@ -1838,7 +1978,7 @@
         });
         document.querySelectorAll('input[name="v2-tier"]').forEach(function (r) {
             r.addEventListener('change', function () {
-                localStorage.setItem('v2_tier', this.value);
+                saveSetting('v2_tier', this.value);
                 updateProductInfo();
                 highlightPackageCard();
             });
@@ -1848,7 +1988,7 @@
         makeDraggable(panel);
 
         // 恢复位置
-        var savedPos = localStorage.getItem('v2_panel_pos');
+        var savedPos = loadSetting('v2_panel_pos', null);
         if (savedPos) {
             try {
                 var pos = JSON.parse(savedPos);
@@ -1931,7 +2071,7 @@
                 isDragging = false;
                 el.classList.remove('v2-dragging');
                 var rect = el.getBoundingClientRect();
-                localStorage.setItem('v2_panel_pos', JSON.stringify({ left: rect.left, top: rect.top }));
+                saveSetting('v2_panel_pos', JSON.stringify({ left: rect.left, top: rect.top }));
             }
         });
     }
@@ -1941,21 +2081,21 @@
         var css = '' +
             '#v2-control-panel {' +
             '  position: fixed; top: 50px; right: 10px; z-index: 2000000022;' +
-            '  background: rgba(15,15,25,0.92); color: #e0e0e0;' +
-            '  padding: 14px 16px; border-radius: 10px;' +
-            '  font: 12px/1.6 "SF Mono", Consolas, monospace;' +
+            '  background: rgba(0,0,0,0.88); color: #fff;' +
+            '  padding: 10px 14px; border-radius: 8px;' +
+            '  font: 13px/1.6 "SF Mono", Consolas, monospace;' +
             '  user-select: none; cursor: move;' +
-            '  box-shadow: 0 4px 20px rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.08);' +
+            '  box-shadow: 0 2px 8px rgba(0,0,0,0.3);' +
             '  min-width: 280px; max-width: 380px;' +
             '}' +
             '#v2-control-panel.v2-dragging { opacity: 0.8; }' +
             '.v2-panel-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }' +
-            '.v2-label { color: #888; font-size: 11px; width: 32px; flex-shrink: 0; }' +
+            '.v2-label { color: #ccc; font-size: 12px; width: 32px; flex-shrink: 0; }' +
             '.v2-radio-group { display: flex; gap: 2px; }' +
             '.v2-radio-group input { display: none; }' +
             '.v2-radio-group label {' +
             '  padding: 2px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;' +
-            '  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);' +
+            '  background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);' +
             '  transition: all 0.15s;' +
             '}' +
             '.v2-radio-group input:checked + label {' +
@@ -1963,8 +2103,8 @@
             '}' +
             'input[name="v2-package"]:checked + label { background: #e6a23c; border-color: #e6a23c; }' +
             '#v2-buy-time {' +
-            '  width: 90px; background: rgba(255,255,255,0.08); color: #e0e0e0;' +
-            '  border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;' +
+            '  width: 90px; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
             '  padding: 2px 6px; font: 12px monospace;' +
             '}' +
             '.v2-status-dot {' +
@@ -1989,36 +2129,70 @@
             '.v2-btn-secondary:hover { background: #85ce61; }' +
             '.v2-btn:disabled { background: #909399; cursor: not-allowed; }' +
             '.v2-btn-mini {' +
-            '  cursor: pointer; background: rgba(255,255,255,0.1); color: #aaa;' +
-            '  border: 1px solid rgba(255,255,255,0.15); border-radius: 3px;' +
-            '  padding: 1px 6px; font-size: 10px; margin-left: 4px;' +
+            '  cursor: pointer; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
+            '  padding: 2px 10px; font-size: 12px; margin-left: 4px;' +
             '}' +
-            '.v2-btn-mini:hover { background: rgba(255,255,255,0.2); color: #fff; }' +
+            '.v2-btn-mini:hover { background: rgba(255,255,255,0.25); }' +
             '.v2-btn-mini:disabled { opacity: 0.5; cursor: not-allowed; }' +
             '.v2-num-input {' +
-            '  width: 40px; background: rgba(255,255,255,0.08); color: #e0e0e0;' +
-            '  border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;' +
+            '  width: 40px; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
             '  padding: 2px 4px; font: 12px monospace; text-align: center;' +
             '}' +
-            '.v2-hint { color: #666; font-size: 10px; }' +
+            '.v2-hint { color: #999; font-size: 11px; }' +
+            '.v2-help-btn {' +
+            '  display: inline-flex; align-items: center; justify-content: center;' +
+            '  width: 14px; height: 14px; border-radius: 50%;' +
+            '  background: rgba(255,255,255,0.2); color: #fff; font-size: 10px;' +
+            '  border: 1px solid rgba(255,255,255,0.3); cursor: pointer;' +
+            '  margin-left: 4px; padding: 0; line-height: 1; vertical-align: middle;' +
+            '}' +
+            '.v2-help-btn:hover { background: #409eff; border-color: #409eff; }' +
+            '.v2-help-overlay {' +
+            '  position: fixed; top: 0; left: 0; right: 0; bottom: 0;' +
+            '  z-index: 2000000024; display: flex; align-items: center; justify-content: center;' +
+            '  background: rgba(0,0,0,0.5);' +
+            '}' +
+            '.v2-help-box {' +
+            '  background: #fff; color: #333; border-radius: 12px;' +
+            '  max-width: 480px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 24px 32px;' +
+            '  box-shadow: 0 4px 20px rgba(0,0,0,0.3);' +
+            '}' +
+            '.v2-help-box h3 { margin: 0 0 16px 0; font-size: 18px; color: #409eff; border-bottom: 1px solid #eee; padding-bottom: 12px; }' +
+            '.v2-help-box p { margin: 6px 0; font-size: 13px; line-height: 1.8; color: #333; }' +
+            '.v2-help-box .v2-help-highlight { color: #e6a23c; font-weight: bold; }' +
+            '.v2-help-box .v2-help-step { color: #67c23a; font-weight: bold; }' +
+            '.v2-help-close {' +
+            '  margin-top: 20px; cursor: pointer; background: #409eff; color: #fff;' +
+            '  border: none; border-radius: 6px; padding: 8px 32px; font-size: 14px;' +
+            '}' +
+            '.v2-help-close:hover { background: #66b1ff; }' +
+            '.v2-help-item {' +
+            '  margin-bottom: 16px; padding-left: 24px; position: relative;' +
+            '  font-size: 14px; line-height: 1.8; color: #333;' +
+            '}' +
+            '.v2-help-num {' +
+            '  position: absolute; left: 0; color: #409eff; font-weight: bold;' +
+            '}' +
             '.v2-bizid-input {' +
-            '  flex: 1; min-width: 0; background: rgba(255,255,255,0.08); color: #e0e0e0;' +
-            '  border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;' +
+            '  flex: 1; min-width: 0; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
             '  padding: 2px 6px; font: 11px monospace;' +
             '}' +
-            '.v2-bizid-input::placeholder { color: #555; }' +
+            '.v2-bizid-input::placeholder { color: rgba(255,255,255,0.4); }' +
             '.v2-product-info { color: #67c23a; font-size: 11px; }' +
             '.v2-log-area {' +
             '  margin-top: 8px; max-height: 120px; overflow-y: auto;' +
             '  background: rgba(0,0,0,0.3); border-radius: 4px; padding: 6px 8px;' +
-            '  font-size: 10px; color: #aaa; white-space: pre-wrap; word-break: break-all;' +
+            '  font-size: 10px; color: #ccc; white-space: pre-wrap; word-break: break-all;' +
             '}' +
             '.v2-log-area::-webkit-scrollbar { width: 4px; }' +
             '.v2-log-area::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }' +
             '.v2-log-hidden { display: none; }' +
-            '.v2-separator { border-top: 1px solid rgba(255,255,255,0.1); margin: 6px 0; }' +
+            '.v2-separator { border-top: 1px solid rgba(255,255,255,0.15); margin: 6px 0; }' +
             '.v2-precache-row { gap: 4px !important; }' +
-            '.v2-token-count { font-size: 11px; color: #e6a23c; min-width: 30px; text-align: center; }' +
+            '.v2-token-count { font-size: 12px; color: #e6a23c; min-width: 30px; text-align: center; }' +
             '.v2-token-table {' +
             '  width: 100%; border-collapse: collapse; margin: 4px 0;' +
             '  font-size: 10px; color: #ccc;' +
@@ -2032,13 +2206,13 @@
             '.v2-token-table tbody::-webkit-scrollbar { width: 3px; }' +
             '.v2-token-table tbody::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }' +
             '.v2-token-table th {' +
-            '  text-align: left; padding: 2px 4px; color: #888; font-weight: normal;' +
-            '  border-bottom: 1px solid rgba(255,255,255,0.1);' +
+            '  text-align: left; padding: 2px 4px; color: #999; font-weight: normal;' +
+            '  border-bottom: 1px solid rgba(255,255,255,0.15);' +
             '}' +
             '.v2-token-table td { padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }' +
-            '.v2-token-table tr:hover { background: rgba(255,255,255,0.05); }' +
-            '.v2-token-expired td { color: #555; text-decoration: line-through; }' +
-            '.v2-token-empty { color: #555; font-style: italic; text-align: center; }' +
+            '.v2-token-table tr:hover { background: rgba(255,255,255,0.08); }' +
+            '.v2-token-expired td { color: #666; text-decoration: line-through; }' +
+            '.v2-token-empty { color: #666; font-style: italic; text-align: center; }' +
             '.v2-tag {' +
             '  display: inline-block; padding: 0 4px; border-radius: 2px; font-size: 9px;' +
             '}' +
@@ -2048,31 +2222,31 @@
             '.v2-tag-sending { background: rgba(64,158,255,0.2); color: #409eff; }' +
             '.v2-checkbox-label {' +
             '  display: flex; align-items: center; gap: 4px; cursor: pointer;' +
-            '  font-size: 11px; color: #aaa;' +
+            '  font-size: 12px; color: #ccc;' +
             '}' +
             '.v2-checkbox-label input { margin: 0; }' +
             '.v2-detail-overlay {' +
             '  position: fixed; top: 0; left: 0; right: 0; bottom: 0;' +
             '  z-index: 2000000023; display: flex; align-items: center; justify-content: center;' +
-            '  background: rgba(0,0,0,0.6);' +
+            '  background: rgba(0,0,0,0.5);' +
             '}' +
             '.v2-detail-box {' +
-            '  background: #1a1a2e; color: #e0e0e0; border-radius: 8px;' +
+            '  background: #fff; color: #333; border-radius: 12px;' +
             '  max-width: 500px; width: 90%; max-height: 60vh; overflow: hidden;' +
-            '  box-shadow: 0 4px 20px rgba(0,0,0,0.5);' +
+            '  box-shadow: 0 4px 20px rgba(0,0,0,0.3);' +
             '}' +
             '.v2-detail-header {' +
             '  display: flex; justify-content: space-between; align-items: center;' +
-            '  padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.1);' +
-            '  font-size: 13px; font-weight: bold;' +
+            '  padding: 12px 16px; border-bottom: 1px solid #eee;' +
+            '  font-size: 14px; font-weight: bold; color: #333;' +
             '}' +
             '.v2-detail-header button {' +
-            '  background: none; border: none; color: #aaa; font-size: 18px; cursor: pointer;' +
+            '  background: none; border: none; color: #999; font-size: 18px; cursor: pointer;' +
             '}' +
             '.v2-detail-body {' +
-            '  padding: 12px; overflow-y: auto; max-height: 50vh; margin: 0;' +
-            '  font-size: 11px; white-space: pre-wrap; word-break: break-all;' +
-            '  color: #bbb; background: none;' +
+            '  padding: 16px; overflow-y: auto; max-height: 50vh; margin: 0;' +
+            '  font-size: 12px; white-space: pre-wrap; word-break: break-all;' +
+            '  color: #333; background: none;' +
             '}' +
             /* 套餐卡片高亮 */
             '.package-card-box.auto-buy-selected {' +
@@ -2232,6 +2406,7 @@
                 if (resp.code === 200 && resp.data) {
                     state.userInfo = resp.data;
                     state.customerNumber = resp.data.customerNumber;
+                    state.customerName = resp.data.customerName;
                     log('初始化', '用户: ' + resp.data.customerName + ' (' + resp.data.customerNumber + ')');
                 }
             }).catch(function (e) {
