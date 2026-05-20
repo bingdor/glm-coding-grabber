@@ -540,16 +540,24 @@ function sendPreviewRequest(body, headers) {
 }
 
 function handlePreviewResponse(resp) {
+    var payRef = win.vueApp?.$refs?.payComponentRef;
     if (resp.code === 555) {
         // 繁忙：responseText 已被转为 code 1505，Vue 不会弹出繁忙弹窗
         // 此处同步关闭弹窗（XHR load 事件先于 axios microtask）
-        var payRef = win.vueApp?.$refs?.payComponentRef;
         if (payRef) {
             payRef.payDialogVisible = false;
             payRef.captchaVerified = false;
             payRef.isServerBusy = false;
         }
         win.vueApp?.$message({ message: '抢购人数太多,继续抢购...', type: 'warning', duration: 1500 });
+    } else if (resp.code === 500) {
+        // 服务端500：重置验证码状态，允许重新弹出验证码
+        if (payRef) {
+            payRef.payDialogVisible = false;
+            payRef.captchaVerified = false;
+            payRef.isServerBusy = false;
+        }
+        win.vueApp?.$message({ message: '服务器错误(500)，继续抢购...', type: 'warning', duration: 1500 });
     } else if (resp.code === 200 && resp.data && resp.data.soldOut) {
         // 售罄：Vue 已自动关闭弹窗并弹出 warning
         win.vueApp?.$message({ message: '已售罄，继续抢购...', type: 'warning', duration: 1500 });

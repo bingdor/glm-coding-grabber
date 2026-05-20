@@ -1408,6 +1408,9 @@
     // 流水线：解验证码 → await preview → 成功立即返回，失败继续下一个
     async function solveAndFirePipeline(product) {
         for (var i = 0; i < 3 && state.running; i++) {
+            // 非首次尝试时，给 SDK 清理时间避免实例冲突
+            if (i > 0) await sleep(500);
+
             try {
                 log('线路' + (i + 1), '弹出验证码...');
                 var captchaResult = await getCaptchaTicket();
@@ -1560,7 +1563,7 @@
                 return false;
             }
             log('抢购', '本轮全部失败，继续...');
-            await sleep(300);
+            await sleep(800);
         }
         return false;
     }
