@@ -43,6 +43,12 @@
         var CLICK_OCR_URL = 'http://127.0.0.1:9898/click';
 
         function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+        function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+        function getAntiDetect() {
+            try { return GM_getValue('v2_anti_detect') === 'true' || GM_getValue('v2_anti_detect') === true; } catch (e) {}
+            try { return localStorage.getItem('v2_anti_detect') === 'true'; } catch (e) {}
+            return false;
+        }
         function log(msg) { console.log('%c[CaptchaSolver] ' + msg, 'color:#58a6ff'); }
 
         function fetchImage(url) {
@@ -117,8 +123,11 @@
             var rect = el.getBoundingClientRect();
             var scaleX = imgW > 0 ? rect.width / imgW : 1;
             var scaleY = imgH > 0 ? rect.height / imgH : 1;
-            var cx = rect.left + x * scaleX;
-            var cy = rect.top + y * scaleY;
+            var antiDetect = getAntiDetect();
+            var offsetX = antiDetect ? (Math.random() - 0.5) * 12 : 0;
+            var offsetY = antiDetect ? (Math.random() - 0.5) * 12 : 0;
+            var cx = rect.left + x * scaleX + offsetX;
+            var cy = rect.top + y * scaleY + offsetY;
             var win = el.ownerDocument.defaultView || window;
 
             var base = { clientX: cx, clientY: cy, bubbles: true, cancelable: true, view: win };
@@ -200,10 +209,10 @@
 
             for (var i = 0; i < coords.length; i++) {
                 simulateClick(bgEl, coords[i].x, coords[i].y, imgW, imgH);
-                await sleep(150);
+                await sleep(getAntiDetect() ? randInt(300, 600) : 150);
             }
 
-            await sleep(300);
+            await sleep(getAntiDetect() ? randInt(400, 700) : 300);
             var confirmBtn = document.querySelector('.verify-btn');
             if (confirmBtn) confirmBtn.click();
             return 'clicked';
@@ -420,6 +429,14 @@
         console.log('[v2-storage] load', key, '| GM=', gmVal, '| LS=', lsVal, '| default=', defaultVal, '→ result=', result);
         return result;
     }
+
+    function getAntiDetect() {
+        try { return GM_getValue('v2_anti_detect') === 'true' || GM_getValue('v2_anti_detect') === true; } catch (e) {}
+        try { return localStorage.getItem('v2_anti_detect') === 'true'; } catch (e) {}
+        return false;
+    }
+
+    function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
     // ==================== 工具函数 ====================
     function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -843,14 +860,15 @@
         if (isDone()) return;
 
         // 模拟点击
+        var antiDetect = getAntiDetect();
         for (var i = 0; i < result.points.length; i++) {
             if (isDone()) return;
-            clickOnCaptchaImage(bgEl, result.points[i], size);
-            await sleep(120);
+            clickOnCaptchaImage(bgEl, result.points[i], size, antiDetect);
+            await sleep(antiDetect ? randInt(300, 600) : 120);
         }
 
         // 点击确认
-        await sleep(100);
+        await sleep(antiDetect ? randInt(400, 700) : 100);
         var confirmBtn = document.querySelector('.tencent-captcha-dy__verify-confirm-btn');
         if (confirmBtn && !isDone()) {
             confirmBtn.click();
@@ -858,12 +876,14 @@
     }
 
     // 在验证码图片上模拟点击
-    function clickOnCaptchaImage(bgEl, point, imgSize) {
+    function clickOnCaptchaImage(bgEl, point, imgSize, antiDetect) {
         var rect = bgEl.getBoundingClientRect();
         var scaleX = rect.width / imgSize.w;
         var scaleY = rect.height / imgSize.h;
-        var clientX = rect.left + point.x * scaleX;
-        var clientY = rect.top + point.y * scaleY;
+        var offsetX = antiDetect ? (Math.random() - 0.5) * 12 : 0;
+        var offsetY = antiDetect ? (Math.random() - 0.5) * 12 : 0;
+        var clientX = rect.left + point.x * scaleX + offsetX;
+        var clientY = rect.top + point.y * scaleY + offsetY;
 
         var baseOpts = {
             bubbles: true, cancelable: true,
@@ -1714,6 +1734,7 @@
         var savedPrecacheCount = loadSetting('v2_precache_count', '5');
         var savedAutoPrecache = loadSetting('v2_auto_precache', 'true');
         var savedShowLog = loadSetting('v2_show_log', 'false');
+        var savedAntiDetect = loadSetting('v2_anti_detect', 'false');
 
         // 恢复 CONFIG
         CONFIG.PRECACHE_INTERVAL = parseInt(savedInterval, 10) || 1800;
@@ -1782,6 +1803,10 @@
             '<label class="v2-checkbox-label">' +
             '<input type="checkbox" id="v2-show-log"' + (savedShowLog === 'true' ? ' checked' : '') + ' />' +
             '日志' +
+            '</label>' +
+            '<label class="v2-checkbox-label">' +
+            '<input type="checkbox" id="v2-anti-detect"' + (savedAntiDetect === 'true' ? ' checked' : '') + ' />' +
+            '防检测' +
             '</label>' +
             '</div>' +
             '<div class="v2-separator"></div>' +
@@ -1895,6 +1920,23 @@
                 el.classList.add('v2-log-hidden');
             }
             saveSetting('v2_show_log', String(this.checked));
+        });
+
+        // 防检测 toggle
+        document.getElementById('v2-anti-detect').addEventListener('change', function () {
+            saveSetting('v2_anti_detect', String(this.checked));
+            if (this.checked) {
+                try {
+                    var msgEl = document.createElement('div');
+                    msgEl.id = 'v2-anti-detect-tip';
+                    msgEl.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+                        'background:rgba(0,0,0,0.85);color:#e6a23c;padding:12px 24px;border-radius:8px;' +
+                        'font:14px/1.6 system-ui,sans-serif;z-index:2000000025;pointer-events:none;';
+                    msgEl.textContent = '防检测已开启：点击验证码速度会调慢一点';
+                    document.body.appendChild(msgEl);
+                    setTimeout(function () { msgEl.remove(); }, 2500);
+                } catch (e) {}
+            }
         });
 
         // 详情弹窗关闭
