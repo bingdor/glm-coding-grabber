@@ -2,7 +2,7 @@
 // @name         GLM抢号-v2
 // @namespace    05info
 // @author       Spanky
-// @version      2.2.0
+// @version      2.2.1
 // @description  纯接口抢购 - 无DOM依赖，直接API调用
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
@@ -124,8 +124,8 @@
             var scaleX = imgW > 0 ? rect.width / imgW : 1;
             var scaleY = imgH > 0 ? rect.height / imgH : 1;
             var antiDetect = getAntiDetect();
-            var offsetX = antiDetect ? (Math.random() - 0.5) * 12 : 0;
-            var offsetY = antiDetect ? (Math.random() - 0.5) * 12 : 0;
+            var offsetX = antiDetect ? (Math.random() - 0.5) * 20 : 0;
+            var offsetY = antiDetect ? (Math.random() - 0.5) * 20 : 0;
             var cx = rect.left + x * scaleX + offsetX;
             var cy = rect.top + y * scaleY + offsetY;
             var win = el.ownerDocument.defaultView || window;
@@ -1814,6 +1814,7 @@
             '<button id="v2-start-btn" class="v2-btn v2-btn-primary">开始抢购</button>' +
             '<button id="v2-test-btn" class="v2-btn v2-btn-secondary" style="display:none;">测试验证码</button>' +
             '</div>' +
+            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.1</div>' +
             '<div class="v2-log-area v2-log-hidden" id="v2-log-area"></div>' +
             '<div class="v2-detail-overlay" id="v2-detail-overlay" style="display:none;">' +
             '<div class="v2-detail-box">' +
@@ -1843,7 +1844,7 @@
             '</div>' +
             '<div class="v2-help-overlay" id="v2-main-help-overlay" style="display:none;">' +
             '<div class="v2-help-box" style="max-width:460px;">' +
-            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.0</span></h3>' +
+            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.1</span></h3>' +
             '<div class="v2-help-item"><span class="v2-help-num">1.</span>请<span class="v2-help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="v2-help-highlight">不要刷新</span>。选择套餐和档位，设置抢购时间，点击"开始抢购"即可到点自动抢购。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
