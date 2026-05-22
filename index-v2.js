@@ -2,7 +2,7 @@
 // @name         GLM抢号-v2
 // @namespace    05info
 // @author       Spanky
-// @version      2.2.1
+// @version      2.2.2
 // @description  纯接口抢购 - 无DOM依赖，直接API调用
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
@@ -321,7 +321,7 @@
         OCR_BACKEND: 'ddddocr',
         DDDDOCR_URL: 'http://127.0.0.1:9898/click',
         CAPTCHA_MAX_RETRY: 10,
-        RETRY_ON_BUSY: 3,
+        RETRY_ON_BUSY: 0,
         RETRY_INTERVAL: 300,
         // 预存 token 之间 preview 请求间隔（ms）
         PRECACHE_INTERVAL: 1800,
@@ -1428,8 +1428,8 @@
     // 流水线：解验证码 → await preview → 成功立即返回，失败继续下一个
     async function solveAndFirePipeline(product) {
         for (var i = 0; i < 3 && state.running; i++) {
-            // 非首次尝试时，给 SDK 清理时间避免实例冲突
-            if (i > 0) await sleep(500);
+            // 等待 SDK 实例清理，避免验证码实例冲突导致拿到残留 ticket
+            if (i > 0) await sleep(1500);
 
             try {
                 log('线路' + (i + 1), '弹出验证码...');
@@ -1439,6 +1439,12 @@
                 continue;
             }
             if (!state.running) break;
+
+            // 验证码结果基本校验
+            if (!captchaResult || !captchaResult.ticket || captchaResult.ticket.length < 10) {
+                log('线路' + (i + 1), '验证码返回无效 ticket，跳过');
+                continue;
+            }
 
             // 加入表格跟踪
             var tokenObj = {
@@ -1454,6 +1460,10 @@
             log('线路' + (i + 1), '验证码通过，请求 preview...');
             var data = await tryPreviewWithRetryAndRecord(captchaResult, product, tokenObj);
             if (data) return { data: data, tokenObj: tokenObj };
+
+            // preview 失败后等待 SDK 清理，避免下一个 ticket 是残留的
+            log('线路' + (i + 1), 'preview 失败，等待 SDK 清理...');
+            await sleep(1000);
         }
         return null;
     }
@@ -1814,7 +1824,7 @@
             '<button id="v2-start-btn" class="v2-btn v2-btn-primary">开始抢购</button>' +
             '<button id="v2-test-btn" class="v2-btn v2-btn-secondary" style="display:none;">测试验证码</button>' +
             '</div>' +
-            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.1</div>' +
+            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.2</div>' +
             '<div class="v2-log-area v2-log-hidden" id="v2-log-area"></div>' +
             '<div class="v2-detail-overlay" id="v2-detail-overlay" style="display:none;">' +
             '<div class="v2-detail-box">' +
@@ -1844,7 +1854,7 @@
             '</div>' +
             '<div class="v2-help-overlay" id="v2-main-help-overlay" style="display:none;">' +
             '<div class="v2-help-box" style="max-width:460px;">' +
-            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.1</span></h3>' +
+            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.2</span></h3>' +
             '<div class="v2-help-item"><span class="v2-help-num">1.</span>请<span class="v2-help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="v2-help-highlight">不要刷新</span>。选择套餐和档位，设置抢购时间，点击"开始抢购"即可到点自动抢购。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
