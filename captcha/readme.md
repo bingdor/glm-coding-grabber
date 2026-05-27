@@ -5,8 +5,6 @@
 ## 启动
 
 ```bash
-cd /Users/yangyiming/Documents/nodeDev/captcha
-source venv/bin/activate
 python ddddocr_server.py
 ```
 
