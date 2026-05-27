@@ -1,6 +1,6 @@
 # GLM Coding 抢号脚本
 
-![效果演示](doc/效果.gif)
+![效果演示](doc/效果2.gif)
 
 油猴（Tampermonkey）用户脚本，用于定时自动抢购智谱 GLM Coding 套餐。
 
