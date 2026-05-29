@@ -184,4 +184,4 @@ glm-coding-grabber/
 
 如果觉得脚本有用，欢迎用我的分享链接抢购，你有 **5% 优惠**，我也会获得一些邀请赠送额度，感谢支持！
 
-👉 [点击拼模](https://www.bigmodel.cn/glm-coding?ic=HX44VX6Q0S)
+👉 [点击拼模](https://www.bigmodel.cn/glm-coding?ic=V5UCF6QKLX)
