@@ -2,7 +2,7 @@
 // @name         GLM抢号-v2
 // @namespace    05info
 // @author       Spanky
-// @version      2.2.2
+// @version      2.2.3
 // @description  纯接口抢购 - 无DOM依赖，直接API调用
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
@@ -1110,7 +1110,7 @@
 
     function getTargetPrecacheCount() {
         var el = document.getElementById('v2-precache-count');
-        return el ? (parseInt(el.value, 10) || 5) : 5;
+        return Math.min(el ? (parseInt(el.textContent, 10) || 0) : 0, 5);
     }
 
     function getManualBizId() {
@@ -1515,8 +1515,8 @@
             return true;
         }
 
-        // Phase 1: 用预存 token 逐个请求（避免并发触发服务端繁忙）
-        var cachedTokens = getValidCachedTokens();
+        // Phase 1: 用预存 token 逐个请求（LIFO：后进先出，最新的 token 优先使用）
+        var cachedTokens = getValidCachedTokens().reverse();
         if (cachedTokens.length > 0) {
             updatePanelState('预存token请求中 (' + cachedTokens.length + '个)...', 'running');
             log('预存', '逐个请求 preview，共 ' + cachedTokens.length + ' 个');
@@ -1643,9 +1643,9 @@
             var s = secs % 60;
             updatePanelState('等待 ' + getBuyTimeStr() + ' (' + m + ':' + (s < 10 ? '0' : '') + s + ')', 'waiting');
 
-            // 自动预存：倒计时 < 60s 时触发（用 precacheRunning 阻止重复）
+            // 自动预存：倒计时 < 30s 时触发（用 precacheRunning 阻止重复）
             var autoPrecache = document.getElementById('v2-auto-precache')?.checked;
-            if (autoPrecache && secs <= 60 && secs > 1 && !state.precacheRunning) {
+            if (autoPrecache && secs <= 30 && secs > 1 && !state.precacheRunning) {
                 var validCount = getValidCachedTokens().length;
                 var targetCount = getTargetPrecacheCount();
                 if (validCount < targetCount) {
@@ -1741,7 +1741,7 @@
         var savedPkg = loadSetting('v2_package', CONFIG.PACKAGE_TYPE_DEFAULT);
         var savedTier = loadSetting('v2_tier', CONFIG.TIER_DEFAULT);
         var savedInterval = loadSetting('v2_precache_interval', String(CONFIG.PRECACHE_INTERVAL));
-        var savedPrecacheCount = loadSetting('v2_precache_count', '5');
+        var savedPrecacheCount = Math.min(parseInt(loadSetting('v2_precache_count', '1'), 10) || 1, 5);
         var savedAutoPrecache = loadSetting('v2_auto_precache', 'true');
         var savedShowLog = loadSetting('v2_show_log', 'false');
         var savedAntiDetect = loadSetting('v2_anti_detect', 'false');
@@ -1790,7 +1790,11 @@
             '<div class="v2-separator"></div>' +
             '<div class="v2-panel-row v2-precache-row">' +
             '<span class="v2-label" style="width:50px;">预存<button id="v2-precache-help" class="v2-help-btn" title="预存说明">?</button></span>' +
-            '<input type="number" id="v2-precache-count" min="1" max="10" value="' + savedPrecacheCount + '" class="v2-num-input">' +
+            '<div class="v2-stepper">' +
+            '<button id="v2-precache-minus" class="v2-stepper-btn">-</button>' +
+            '<span id="v2-precache-count" class="v2-stepper-val">' + savedPrecacheCount + '</span>' +
+            '<button id="v2-precache-plus" class="v2-stepper-btn">+</button>' +
+            '</div>' +
             '<span class="v2-hint">个</span>' +
             '<span id="v2-token-count" class="v2-token-count">0/0</span>' +
             '<button id="v2-precache-btn" class="v2-btn-mini">预存</button>' +
@@ -1808,7 +1812,7 @@
             '<div class="v2-panel-row">' +
             '<label class="v2-checkbox-label">' +
             '<input type="checkbox" id="v2-auto-precache"' + (savedAutoPrecache !== 'false' ? ' checked' : '') + ' />' +
-            '自动预存(倒计时&lt;60s)' +
+            '自动预存(倒计时&lt;30s)' +
             '</label>' +
             '<label class="v2-checkbox-label">' +
             '<input type="checkbox" id="v2-show-log"' + (savedShowLog === 'true' ? ' checked' : '') + ' />' +
@@ -1824,7 +1828,7 @@
             '<button id="v2-start-btn" class="v2-btn v2-btn-primary">开始抢购</button>' +
             '<button id="v2-test-btn" class="v2-btn v2-btn-secondary" style="display:none;">测试验证码</button>' +
             '</div>' +
-            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.2</div>' +
+            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.3</div>' +
             '<div class="v2-log-area v2-log-hidden" id="v2-log-area"></div>' +
             '<div class="v2-detail-overlay" id="v2-detail-overlay" style="display:none;">' +
             '<div class="v2-detail-box">' +
@@ -1838,13 +1842,13 @@
             '<p><span class="v2-help-highlight">什么是预存？</span><br/>' +
             '预存是指在抢购倒计时结束前，提前完成验证码识别并缓存获得的 ticket 凭证。这样在正式抢购时可以直接使用缓存的凭证发起请求，跳过验证码识别环节，从而大幅减少延迟。</p>' +
             '<p><span class="v2-help-step">工作流程：</span></p>' +
-            '<p>1. 手动点击"预存"或开启"自动预存"（倒计时 ≤ 60s 自动触发）<br/>' +
+            '<p>1. 手动点击"预存"或开启"自动预存"（倒计时 ≤ 30s 自动触发）<br/>' +
             '2. 脚本自动弹出腾讯验证码并通过 OCR 识别完成验证<br/>' +
             '3. 验证通过后获得 ticket + randstr，存入缓存（有效期 180 秒）<br/>' +
-            '4. 到达抢购时间时，脚本用缓存的 ticket 直接请求 preview 接口<br/>' +
+            '4. 到达抢购时间时，脚本用缓存的 ticket 直接请求 preview 接口（后进先出）<br/>' +
             '5. 每个预存 token 会独立请求 preview，命中即可锁单</p>' +
             '<p><span class="v2-help-highlight">使用建议：</span><br/>' +
-            '- 预存 3~5 个即可，太多可能触发验证码频率限制<br/>' +
+            '- 预存 1~5 个即可，太多可能触发验证码频率限制<br/>' +
             '- token 有效期 180 秒，预存过早会过期失效<br/>' +
             '- 表格中可以看到每个 token 的 preview 和锁单结果</p>' +
             '<p><span class="v2-help-highlight">请求间隔：</span><br/>' +
@@ -1854,7 +1858,7 @@
             '</div>' +
             '<div class="v2-help-overlay" id="v2-main-help-overlay" style="display:none;">' +
             '<div class="v2-help-box" style="max-width:460px;">' +
-            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.2</span></h3>' +
+            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.3</span></h3>' +
             '<div class="v2-help-item"><span class="v2-help-num">1.</span>请<span class="v2-help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="v2-help-highlight">不要刷新</span>。选择套餐和档位，设置抢购时间，点击"开始抢购"即可到点自动抢购。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
@@ -1912,10 +1916,16 @@
             clearCachedTokens();
         });
 
-        // 预存数量
-        document.getElementById('v2-precache-count').addEventListener('input', function () {
-            saveSetting('v2_precache_count', this.value);
-        });
+        // 预存数量 +/\-
+        function adjustPrecacheCount(delta) {
+            var el = document.getElementById('v2-precache-count');
+            var v = parseInt(el.textContent, 10) || 0;
+            v = Math.max(0, Math.min(5, v + delta));
+            el.textContent = v;
+            saveSetting('v2_precache_count', v);
+        }
+        document.getElementById('v2-precache-minus').addEventListener('click', function () { adjustPrecacheCount(-1); });
+        document.getElementById('v2-precache-plus').addEventListener('click', function () { adjustPrecacheCount(1); });
 
         // 自动预存
         document.getElementById('v2-auto-precache').addEventListener('change', function () {
@@ -1992,6 +2002,12 @@
                 if (resp.code === 200 && resp.data && resp.data.productList) {
                     updateProductsFromBatchPreview(resp.data.productList);
                     updateProductInfo();
+                } else if (resp.code === 555) {
+                    var infoEl = document.getElementById('v2-product-info');
+                    if (infoEl) {
+                        infoEl.textContent = '繁忙';
+                        infoEl.style.color = '#e6a23c';
+                    }
                 } else {
                     log('产品', '刷新失败: ' + (resp.msg || resp.code));
                 }
@@ -2191,6 +2207,21 @@
             '}' +
             '.v2-btn-mini:hover { background: rgba(255,255,255,0.25); }' +
             '.v2-btn-mini:disabled { opacity: 0.5; cursor: not-allowed; }' +
+            '.v2-stepper { display: flex; align-items: center; gap: 0; }' +
+            '.v2-stepper-btn {' +
+            '  width: 22px; height: 22px; border: 1px solid rgba(255,255,255,0.3);' +
+            '  background: rgba(255,255,255,0.15); color: #fff; font-size: 14px;' +
+            '  cursor: pointer; display: flex; align-items: center; justify-content: center;' +
+            '  line-height: 1; padding: 0;' +
+            '}' +
+            '.v2-stepper-btn:first-child { border-radius: 4px 0 0 4px; }' +
+            '.v2-stepper-btn:last-child { border-radius: 0 4px 4px 0; }' +
+            '.v2-stepper-btn:hover { background: rgba(255,255,255,0.3); }' +
+            '.v2-stepper-val {' +
+            '  width: 28px; height: 22px; border-top: 1px solid rgba(255,255,255,0.3);' +
+            '  border-bottom: 1px solid rgba(255,255,255,0.3); background: rgba(0,0,0,0.3);' +
+            '  color: #fff; font-size: 12px; text-align: center; line-height: 22px;' +
+            '}' +
             '.v2-num-input {' +
             '  width: 40px; background: rgba(255,255,255,0.15); color: #fff;' +
             '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
