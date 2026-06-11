@@ -1946,7 +1946,7 @@
             '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">4.</span>脚本原理是自动激活购买按钮并通过接口直接调用，不使用暴力手段。能否抢到仍需运气，祝您好运！</div>' +
-            '<div class="v2-help-item"><span class="v2-help-num">5.</span><span class="v2-help-highlight">锁单机制</span>：preview 成功后自动调 create-sign 接口锁单，锁住订单后弹出支付二维码。若锁单失败，会自动弹出页面原生支付弹窗供您扫码。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">5.</span><span class="v2-help-highlight">锁单机制</span>：preview 成功后自动调 create-sign 接口锁单，锁住订单后弹出支付二维码。若锁单失败，会自动弹出页面原生支付弹窗供您扫码。若锁单成功但二维码未弹出，可在接口记录详情中点击「重新弹出支付二维码」，或复制 sign 链接到 <a href="https://freetoolkit.cn/tools/%E4%BA%8C%E7%BB%B4%E7%A0%81%E7%94%9F%E6%88%90" target="_blank" style="color:#409eff;">在线二维码生成工具</a> 手动生成。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">6.</span><span class="v2-help-highlight">预存</span>：在抢购前提前解验证码缓存 ticket，到点直接用缓存请求。详情请点击预存旁的 <span style="color:#409eff;">?</span> 按钮。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">7.</span><span class="v2-help-highlight">间隔</span>：抢购时每个预存 token 发起 preview 请求之间的等待时间（ms），默认 1800，太快可能触发服务端繁忙。</div>' +
             '<div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(0,0,0,0.08);text-align:center;">' +
