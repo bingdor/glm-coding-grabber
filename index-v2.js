@@ -2204,6 +2204,8 @@
 
         el.addEventListener('mousedown', function (e) {
             if (['BUTTON', 'INPUT', 'LABEL', 'TEXTAREA'].indexOf(e.target.tagName) >= 0) return;
+            // 详情弹窗内允许文本选择，不触发拖拽
+            if (e.target.closest && e.target.closest('.v2-detail-overlay')) return;
             isDragging = true;
             el.classList.add('v2-dragging');
             startX = e.clientX;
