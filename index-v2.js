@@ -1116,11 +1116,11 @@
                     // preview 成功但未锁单 → 打开支付页面
                     var productInfo = PRODUCTS[getSelectedPackageType()] &&
                         PRODUCTS[getSelectedPackageType()][getSelectedTier()];
-                    if (productInfo) {
+                    if (productInfo && previewData.bizId) {
                         var openBtn = document.createElement('button');
                         openBtn.textContent = '打开支付页面';
                         openBtn.style.cssText = 'background:#409eff;color:#fff;border:none;border-radius:6px;' +
-                            'padding:8px 24px;font-size:14px;cursor:pointer;margin:0 4px;';
+                            'padding:8px 24px;font-size:14px;cursor:pointer;margin:0 4px;transform:translateY(-20px);';
                         openBtn.addEventListener('click', function () {
                             openPaymentDialog(previewData, productInfo);
                         });
@@ -1260,7 +1260,6 @@
         if (existing) existing.remove();
         var existingOverlay = document.getElementById('v2-lockfail-overlay');
         if (existingOverlay) existingOverlay.remove();
-
         var qrSize = large ? 350 : 240;
         var popupWidth = large ? 490 : 440;
 
@@ -1916,7 +1915,7 @@
             '<div class="v2-detail-box">' +
             '<div class="v2-detail-header"><span id="v2-detail-title">详情</span><button id="v2-detail-close">&times;</button></div>' +
             '<pre class="v2-detail-body" id="v2-detail-body"></pre>' +
-            '<div id="v2-detail-footer" style="padding:0 16px 12px;text-align:center;"></div>' +
+            '<div id="v2-detail-footer" style="padding:0 16px 12px;text-align:center;transform: translateY(-20px);"></div>' +
             '</div>' +
             '</div>' +
             '<div class="v2-help-overlay" id="v2-help-overlay" style="display:none;">' +
