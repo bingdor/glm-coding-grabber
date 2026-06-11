@@ -2,7 +2,7 @@
 // @name         GLM抢号-v2
 // @namespace    05info
 // @author       Spanky
-// @version      2.2.3
+// @version      2.2.4
 // @description  纯接口抢购 - 无DOM依赖，直接API调用
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
@@ -1042,10 +1042,92 @@
         var overlay = document.getElementById('v2-detail-overlay');
         var title = document.getElementById('v2-detail-title');
         var body = document.getElementById('v2-detail-body');
+        var footer = document.getElementById('v2-detail-footer');
         if (overlay && title && body) {
             title.textContent = 'Token #' + (idx + 1);
             body.textContent = lines.join('\n');
             overlay.style.display = 'flex';
+
+            // 详情弹窗底部按钮区域
+            if (footer) {
+                footer.innerHTML = '';
+                var sign = t.lockResult && t.lockResult.success &&
+                           t.lockResult.raw && t.lockResult.raw.data &&
+                           t.lockResult.raw.data.sign;
+                var previewData = t.previewResult && t.previewResult.raw &&
+                                  t.previewResult.raw.data;
+
+                if (sign && previewData) {
+                    // 检查 QRCode 库是否可用
+                    var QR = (typeof QRCode !== 'undefined') ? QRCode
+                        : (typeof win.QRCode !== 'undefined') ? win.QRCode : null;
+
+                    if (QR) {
+                        // QRCode 库可用 → 直接弹出支付二维码
+                        var payBtn = document.createElement('button');
+                        payBtn.textContent = '重新弹出支付二维码';
+                        payBtn.style.cssText = 'background:#e6a23c;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 24px;font-size:14px;cursor:pointer;margin:0 4px;';
+                        payBtn.addEventListener('click', function () {
+                            showPaymentQRPopup(sign, previewData);
+                        });
+                        footer.appendChild(payBtn);
+                    } else {
+                        // QRCode 库不可用 → 引导用户去在线工具生成
+                        var tipEl = document.createElement('div');
+                        tipEl.style.cssText = 'font-size:12px;color:#e6a23c;margin-bottom:8px;line-height:1.6;';
+                        tipEl.textContent = '二维码库未加载，请手动生成：';
+                        footer.appendChild(tipEl);
+
+                        var copyBtn = document.createElement('button');
+                        copyBtn.textContent = '复制 sign 链接';
+                        copyBtn.style.cssText = 'background:#409eff;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 20px;font-size:13px;cursor:pointer;margin:0 4px;';
+                        copyBtn.addEventListener('click', function () {
+                            try {
+                                navigator.clipboard.writeText(sign).then(function () {
+                                    copyBtn.textContent = '已复制!';
+                                    setTimeout(function () { copyBtn.textContent = '复制 sign 链接'; }, 2000);
+                                });
+                            } catch (e) {
+                                // fallback
+                                var ta = document.createElement('textarea');
+                                ta.value = sign;
+                                document.body.appendChild(ta);
+                                ta.select();
+                                document.execCommand('copy');
+                                ta.remove();
+                                copyBtn.textContent = '已复制!';
+                                setTimeout(function () { copyBtn.textContent = '复制 sign 链接'; }, 2000);
+                            }
+                        });
+                        footer.appendChild(copyBtn);
+
+                        var onlineBtn = document.createElement('button');
+                        onlineBtn.textContent = '在线生成二维码';
+                        onlineBtn.style.cssText = 'background:#e6a23c;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 20px;font-size:13px;cursor:pointer;margin:0 4px;';
+                        onlineBtn.addEventListener('click', function () {
+                            window.open('https://freetoolkit.cn/tools/%E4%BA%8C%E7%BB%B4%E7%A0%81%E7%94%9F%E6%88%90', '_blank');
+                        });
+                        footer.appendChild(onlineBtn);
+                    }
+                } else if (previewData && !sign) {
+                    // preview 成功但未锁单 → 打开支付页面
+                    var productInfo = PRODUCTS[getSelectedPackageType()] &&
+                        PRODUCTS[getSelectedPackageType()][getSelectedTier()];
+                    if (productInfo) {
+                        var openBtn = document.createElement('button');
+                        openBtn.textContent = '打开支付页面';
+                        openBtn.style.cssText = 'background:#409eff;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 24px;font-size:14px;cursor:pointer;margin:0 4px;';
+                        openBtn.addEventListener('click', function () {
+                            openPaymentDialog(previewData, productInfo);
+                        });
+                        footer.appendChild(openBtn);
+                    }
+                }
+            }
         }
     };
 
@@ -1185,15 +1267,15 @@
         var popup = document.createElement('div');
         popup.id = 'v2-lockfail-popup';
         popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
-            'background:#fff;border-radius:12px;padding:28px 32px;z-index:999999;min-width:340px;max-width:' + popupWidth + 'px;' +
+            'background:#fff;border-radius:12px;padding:28px 32px;z-index:2000000030;min-width:340px;max-width:' + popupWidth + 'px;' +
             'box-shadow:0 8px 30px rgba(0,0,0,0.25);text-align:center;font-family:system-ui,sans-serif;';
         popup.innerHTML =
             '<div style="font-size:18px;font-weight:600;color:#333;margin-bottom:8px;">抢购成功！请扫码支付</div>' +
             '<div style="font-size:14px;color:#666;margin-bottom:4px;">' + (productName || '') + '</div>' +
             '<div style="font-size:28px;font-weight:bold;color:#e6a23c;margin-bottom:16px;">¥' + amount + '</div>' +
-            '<div style="margin-bottom:12px;"><img src="' + qrDataUrl + '" style="width:' + qrSize + 'px;height:' + qrSize + 'px;border:1px solid #eee;border-radius:8px;" /></div>' +
+            '<div style="margin-bottom:12px;"><img id="v2-qr-img" src="' + qrDataUrl + '" style="width:' + qrSize + 'px;height:' + qrSize + 'px;border:1px solid #eee;border-radius:8px;" /></div>' +
             '<div style="font-size:12px;color:#999;margin-bottom:8px;">' + (subtitle || '请尽快用支付宝扫码支付') + '</div>' +
-            (payUrl ? '<textarea readonly onclick="this.select()" style="width:100%;max-width:360px;height:48px;font-size:11px;color:#409eff;border:1px solid #ddd;border-radius:4px;padding:4px 6px;resize:none;margin-bottom:16px;word-break:break-all;line-height:1.3;outline:none;cursor:pointer;">' + payUrl + '</textarea>' : '') +
+            (payUrl ? '<textarea readonly onclick="this.select();document.execCommand(\'copy\')" style="width:100%;max-width:360px;height:48px;font-size:11px;color:#409eff;border:1px solid #ddd;border-radius:4px;padding:4px 6px;resize:none;margin-bottom:16px;word-break:break-all;line-height:1.3;outline:none;cursor:pointer;" title="点击复制">' + payUrl + '</textarea>' : '') +
             '<div style="display:flex;gap:10px;justify-content:center;margin-top:12px;">' +
             '<button id="v2-lockfail-download" style="background:#67c23a;color:#fff;border:none;border-radius:6px;' +
             'padding:8px 20px;font-size:14px;cursor:pointer;">下载二维码</button>' +
@@ -1203,7 +1285,7 @@
 
         var overlay = document.createElement('div');
         overlay.id = 'v2-lockfail-overlay';
-        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:999998;';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:2000000029;';
         document.body.appendChild(overlay);
 
         var closePopup = function () { popup.remove(); overlay.remove(); };
@@ -1828,12 +1910,13 @@
             '<button id="v2-start-btn" class="v2-btn v2-btn-primary">开始抢购</button>' +
             '<button id="v2-test-btn" class="v2-btn v2-btn-secondary" style="display:none;">测试验证码</button>' +
             '</div>' +
-            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.3</div>' +
+            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.2.4</div>' +
             '<div class="v2-log-area v2-log-hidden" id="v2-log-area"></div>' +
             '<div class="v2-detail-overlay" id="v2-detail-overlay" style="display:none;">' +
             '<div class="v2-detail-box">' +
             '<div class="v2-detail-header"><span id="v2-detail-title">详情</span><button id="v2-detail-close">&times;</button></div>' +
             '<pre class="v2-detail-body" id="v2-detail-body"></pre>' +
+            '<div id="v2-detail-footer" style="padding:0 16px 12px;text-align:center;"></div>' +
             '</div>' +
             '</div>' +
             '<div class="v2-help-overlay" id="v2-help-overlay" style="display:none;">' +
@@ -1858,7 +1941,7 @@
             '</div>' +
             '<div class="v2-help-overlay" id="v2-main-help-overlay" style="display:none;">' +
             '<div class="v2-help-box" style="max-width:460px;">' +
-            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.3</span></h3>' +
+            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.2.4</span></h3>' +
             '<div class="v2-help-item"><span class="v2-help-num">1.</span>请<span class="v2-help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="v2-help-highlight">不要刷新</span>。选择套餐和档位，设置抢购时间，点击"开始抢购"即可到点自动抢购。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
             '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
