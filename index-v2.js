@@ -2404,6 +2404,7 @@
             '  background: #fff; color: #333; border-radius: 12px;' +
             '  max-width: 500px; width: 90%; max-height: 60vh; overflow: hidden;' +
             '  box-shadow: 0 4px 20px rgba(0,0,0,0.3);' +
+            '  user-select: text; -webkit-user-select: text;' +
             '}' +
             '.v2-detail-header {' +
             '  display: flex; justify-content: space-between; align-items: center;' +
