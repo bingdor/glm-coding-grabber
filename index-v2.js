@@ -2141,13 +2141,14 @@
         // 拖拽
         makeDraggable(panel);
 
-        // 恢复位置
+        // 恢复位置（clamp 防止负值导致面板不可见）
         var savedPos = loadSetting('v2_panel_pos', null);
         if (savedPos) {
             try {
                 var pos = JSON.parse(savedPos);
-                panel.style.left = pos.left + 'px';
-                panel.style.top = pos.top + 'px';
+                var clamped = clampPanelPos(pos.left, pos.top, 280, 100);
+                panel.style.left = clamped.left + 'px';
+                panel.style.top = clamped.top + 'px';
                 panel.style.right = 'auto';
             } catch (e) {}
         }
@@ -2197,6 +2198,15 @@
         }
     }
 
+    function clampPanelPos(left, top, elWidth, elHeight) {
+        var vw = window.innerWidth;
+        var vh = window.innerHeight;
+        var minVisible = 40;
+        var clampedLeft = Math.max(0, Math.min(left, vw - minVisible));
+        var clampedTop = Math.max(0, Math.min(top, vh - minVisible));
+        return { left: clampedLeft, top: clampedTop };
+    }
+
     function makeDraggable(el) {
         var isDragging = false;
         var startX, startY, elStartX, elStartY;
@@ -2227,7 +2237,10 @@
                 isDragging = false;
                 el.classList.remove('v2-dragging');
                 var rect = el.getBoundingClientRect();
-                saveSetting('v2_panel_pos', JSON.stringify({ left: rect.left, top: rect.top }));
+                var clamped = clampPanelPos(rect.left, rect.top, rect.width, rect.height);
+                el.style.left = clamped.left + 'px';
+                el.style.top = clamped.top + 'px';
+                saveSetting('v2_panel_pos', JSON.stringify(clamped));
             }
         });
     }
