@@ -2,7 +2,7 @@
 // @name         GLM抢号-v2
 // @namespace    05info
 // @author       Spanky
-// @version      2.2.4
+// @version      2.2.5
 // @description  纯接口抢购 - 无DOM依赖，直接API调用
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
@@ -2202,8 +2202,12 @@
         var vw = window.innerWidth;
         var vh = window.innerHeight;
         var minVisible = 40;
-        var clampedLeft = Math.max(0, Math.min(left, vw - minVisible));
-        var clampedTop = Math.max(0, Math.min(top, vh - minVisible));
+        var w = elWidth || 280;
+        var h = elHeight || 100;
+        // 左侧至少 minVisible 可见：left >= -(w - minVisible)
+        // 右侧至少 minVisible 可见：left <= vw - minVisible
+        var clampedLeft = Math.max(-(w - minVisible), Math.min(left, vw - minVisible));
+        var clampedTop = Math.max(-(h - minVisible), Math.min(top, vh - minVisible));
         return { left: clampedLeft, top: clampedTop };
     }
 
