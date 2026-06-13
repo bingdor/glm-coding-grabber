@@ -123,9 +123,9 @@
             var rect = el.getBoundingClientRect();
             var scaleX = imgW > 0 ? rect.width / imgW : 1;
             var scaleY = imgH > 0 ? rect.height / imgH : 1;
-            var antiDetect = getAntiDetect();
-            var offsetX = antiDetect ? (Math.random() - 0.5) * 20 : 0;
-            var offsetY = antiDetect ? (Math.random() - 0.5) * 20 : 0;
+            // 点击偏移与防检测开关无关，始终带随机偏移，模拟真人落点散布（±20px）
+            var offsetX = (Math.random() - 0.5) * 40;
+            var offsetY = (Math.random() - 0.5) * 40;
             var cx = rect.left + x * scaleX + offsetX;
             var cy = rect.top + y * scaleY + offsetY;
             var win = el.ownerDocument.defaultView || window;
@@ -863,7 +863,7 @@
         var antiDetect = getAntiDetect();
         for (var i = 0; i < result.points.length; i++) {
             if (isDone()) return;
-            clickOnCaptchaImage(bgEl, result.points[i], size, antiDetect);
+            clickOnCaptchaImage(bgEl, result.points[i], size);
             await sleep(antiDetect ? randInt(300, 600) : 120);
         }
 
@@ -876,12 +876,13 @@
     }
 
     // 在验证码图片上模拟点击
-    function clickOnCaptchaImage(bgEl, point, imgSize, antiDetect) {
+    function clickOnCaptchaImage(bgEl, point, imgSize) {
         var rect = bgEl.getBoundingClientRect();
         var scaleX = rect.width / imgSize.w;
         var scaleY = rect.height / imgSize.h;
-        var offsetX = antiDetect ? (Math.random() - 0.5) * 12 : 0;
-        var offsetY = antiDetect ? (Math.random() - 0.5) * 12 : 0;
+        // 点击偏移与防检测开关无关，始终带随机偏移，模拟真人落点散布（±15px）
+        var offsetX = (Math.random() - 0.5) * 30;
+        var offsetY = (Math.random() - 0.5) * 30;
         var clientX = rect.left + point.x * scaleX + offsetX;
         var clientY = rect.top + point.y * scaleY + offsetY;
 
