@@ -573,7 +573,7 @@ var buyBtnIndex = 2;
 // 套餐类型：'month'=月, 'quarter'=季, 'year'=年
 var PACKAGE_TYPE_DEFAULT = 'quarter';
 // 邀请码（自动替换URL中的ic参数）
-var INVITATION_CODE = 'V5UCF6QKLX';
+var INVITATION_CODE = 'XYXVH4BD28';
 
 // ── 验证码识别：仅支持本地 ddddocr HTTP 服务（~100ms） ──
 
@@ -1128,7 +1128,7 @@ function showHelpDialog() {
             </div>
             <div class="help-close">
                 <p style="color:#409eff;margin-bottom:4px;">QQ交流群: <strong>981656846</strong></p>
-                <p style="color:#e6a23c;font-size:12px;margin-bottom:12px;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=V5UCF6QKLX" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>
+                <p style="color:#e6a23c;font-size:12px;margin-bottom:12px;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=XYXVH4BD28" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>
                 <button id="help-close-btn">我知道了</button>
             </div>
         </div>

@@ -316,7 +316,7 @@
         BUY_TIME_DEFAULT: '10:00:00',
         PACKAGE_TYPE_DEFAULT: 'quarter',
         TIER_DEFAULT: 'max',
-        INVITATION_CODE: 'V5UCF6QKLX',
+        INVITATION_CODE: 'XYXVH4BD28',
         CAPTCHA_APP_ID: '196026326',
         OCR_BACKEND: 'ddddocr',
         DDDDOCR_URL: 'http://127.0.0.1:9898/click',
@@ -374,6 +374,7 @@
     async function syncServerTime() {
         var offset = await measureServerOffset();
         serverTimeOffset = offset;
+        serverTimeOffset -= 30;
         var direction = offset > 0 ? '服务器快' : '本机快';
         log('时间同步', 'offset=' + offset.toFixed(0) + 'ms (' + direction + Math.abs(offset).toFixed(0) + 'ms)');
         // 面板上永久显示偏移量
@@ -1951,7 +1952,7 @@
             '<div class="v2-help-item"><span class="v2-help-num">7.</span><span class="v2-help-highlight">间隔</span>：抢购时每个预存 token 发起 preview 请求之间的等待时间（ms），默认 1800，太快可能触发服务端繁忙。</div>' +
             '<div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(0,0,0,0.08);text-align:center;">' +
             '<p style="color:#409eff;margin-bottom:4px;font-size:12px;">QQ交流群: <strong>981656846</strong></p>' +
-            '<p style="color:#e6a23c;font-size:11px;margin-bottom:0;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=V5UCF6QKLX" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>' +
+            '<p style="color:#e6a23c;font-size:11px;margin-bottom:0;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=XYXVH4BD28" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>' +
             '</div>' +
             '<button class="v2-help-close" id="v2-main-help-close">我知道了</button>' +
             '</div>' +

@@ -122,7 +122,7 @@ curl http://127.0.0.1:9898/health
 |------|------|
 | 倒计时 | 显示距离抢购时间的剩余秒数 |
 | 月/季/年 | 选择套餐类型 |
-| 时间输入框 | 设置抢购目标时间（默认 09:59:59） |
+| 时间输入框 | 设置抢购目标时间（默认 10:00:00） |
 | Lite/Pro/Max | 选择产品档位 |
 | 开始/暂停 | 控制抢购运行状态 |
 | 锁单 | 勾选后 preview 成功直接调 create-sign 锁单 |
@@ -184,4 +184,4 @@ glm-coding-grabber/
 
 如果觉得脚本有用，欢迎用我的分享链接抢购，你有 **5% 优惠**，我也会获得一些邀请赠送额度，感谢支持！
 
-👉 [点击拼模](https://www.bigmodel.cn/glm-coding?ic=V5UCF6QKLX)
+👉 [点击拼模](https://www.bigmodel.cn/glm-coding?ic=XYXVH4BD28)
