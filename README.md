@@ -68,6 +68,24 @@ curl http://127.0.0.1:9898/health
 
 > 脚本启动时会自动检测本地验证码服务，如果未启动会弹出警告提示。
 
+#### Windows 用户注意
+
+原版 `ddddocr_server.py` 的字体扫描仅覆盖 macOS 路径，在 Windows 上无法加载中文字体，会导致识别准确率几乎为 0。
+
+**Windows 用户请改用**：
+
+```bash
+cd captcha
+python ddddocr_server_win.py
+```
+
+`ddddocr_server_win.py` 在原版基础上扩展了：
+- 字体路径扫描：`C:\Windows\Fonts\`（含 `msyh`/`simsun`/`simhei`/`simkai`/`simfang` 等微软雅黑/宋体/黑体/楷体/仿宋）
+- 跨平台兼容：Windows / macOS / Linux 自适应，同时支持环境变量 `CAPTCHA_FONT_DIR` 指定额外字体目录
+- 渲染验证：过滤掉只能渲染 fallback 字形的「假阳性」字体
+
+接口与原版完全一致（`/click`、`/health`），可直接替换。
+
 ### 4. 安装油猴脚本
 
 #### 4.1 开启 Tampermonkey 开发者模式
@@ -175,9 +193,10 @@ glm-coding-grabber/
 │   ├── 5.允许重定向.png
 │   └── 6.效果验证.png
 └── captcha/
-    ├── ddddocr_server.py # 本地验证码识别服务
-    ├── requirements.txt  # Python 依赖
-    └── readme.md         # 验证码服务详细说明
+    ├── ddddocr_server.py     # 本地验证码识别服务（macOS / Linux）
+    ├── ddddocr_server_win.py # 本地验证码识别服务（Windows 字体扩展版）
+    ├── requirements.txt      # Python 依赖
+    └── readme.md             # 验证码服务详细说明
 ```
 ## 免责声明
 
