@@ -2,17 +2,21 @@
 // @name         GLM抢号
 // @namespace    05info
 // @author       Spanky
-// @version      2.0.1
+// @version      2.3.1
+// @description  纯接口抢购 - 无DOM依赖，直接API调用；预存token并发爆发 + 毫秒级时钟同步 + 精确卡点 + 555有效token复用
 // @match        https://*.bigmodel.cn/glm-coding*
 // @match        https://*.gtimg.com/*
 // @match        https://*.captcha.qcloud.com/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js
+// @require      https://cdn.bootcdn.net/ajax/libs/qrcode/1.5.0/qrcode.min.js
+// @require      https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js
 // @grant        GM_addStyle
 // @grant        GM_getResourceText
 // @grant        GM_xmlhttpRequest
 // @connect      turing.captcha.qcloud.com
 // @connect      127.0.0.1:9898
 // @connect      127.0.0.1
+// @connect      *
 // @grant        unsafeWindow
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -37,6 +41,7 @@
     // ==================== 验证码自动解题（iframe 内运行） ====================
     function initCaptchaSolver() {
         var CLICK_OCR_URL = 'http://127.0.0.1:9898/click';
+
         function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
         function log(msg) { console.log('%c[CaptchaSolver] ' + msg, 'color:#58a6ff'); }
 
@@ -112,8 +117,11 @@
             var rect = el.getBoundingClientRect();
             var scaleX = imgW > 0 ? rect.width / imgW : 1;
             var scaleY = imgH > 0 ? rect.height / imgH : 1;
-            var cx = rect.left + x * scaleX;
-            var cy = rect.top + y * scaleY;
+            // 点击落点带随机偏移，模拟真人点击散布（±20px），避免像素级精确点击
+            var offsetX = (Math.random() - 0.5) * 40;
+            var offsetY = (Math.random() - 0.5) * 40;
+            var cx = rect.left + x * scaleX + offsetX;
+            var cy = rect.top + y * scaleY + offsetY;
             var win = el.ownerDocument.defaultView || window;
 
             var base = { clientX: cx, clientY: cy, bubbles: true, cancelable: true, view: win };
@@ -247,1860 +255,404 @@
         setInterval(checkAndSolve, 2000);
     }
 
-    // document.querySelector('[view-name=CheckBox]')
-    win.$ = $;
+    // ==================== 产品ID映射（静态默认值，会被 batch-preview 动态更新） ====================
+    // productId -> 静态配置（unit/type 用于分类）
+    var PRODUCT_STATIC = {
+        'product-02434c': { unit: 'month',   type: 'lite', name: 'Lite 月付' },
+        'product-1df3e1': { unit: 'month',   type: 'pro',  name: 'Pro 月付'  },
+        'product-2fc421': { unit: 'month',   type: 'max',  name: 'Max 月付'  },
+        'product-b8ea38': { unit: 'quarter', type: 'lite', name: 'Lite 季付' },
+        'product-fef82f': { unit: 'quarter', type: 'pro',  name: 'Pro 季付'  },
+        'product-5d3a03': { unit: 'quarter', type: 'max',  name: 'Max 季付'  },
+        'product-70a804': { unit: 'year',    type: 'lite', name: 'Lite 年付' },
+        'product-5643e6': { unit: 'year',    type: 'pro',  name: 'Pro 年付'  },
+        'product-d46f8b': { unit: 'year',    type: 'max',  name: 'Max 年付'  }
+    };
+
+    var PRODUCTS = {
+        month: {
+            lite: { productId: 'product-02434c', name: 'Lite 月付', price: 49,   soldOut: true },
+            pro:  { productId: 'product-1df3e1', name: 'Pro 月付',  price: 149,  soldOut: true },
+            max:  { productId: 'product-2fc421', name: 'Max 月付',  price: 469,  soldOut: true }
+        },
+        quarter: {
+            lite: { productId: 'product-b8ea38', name: 'Lite 季付', price: 147,  soldOut: true },
+            pro:  { productId: 'product-fef82f', name: 'Pro 季付',  price: 447,  soldOut: true },
+            max:  { productId: 'product-5d3a03', name: 'Max 季付',  price: 1407, soldOut: true }
+        },
+        year: {
+            lite: { productId: 'product-70a804', name: 'Lite 年付', price: 588,  soldOut: true },
+            pro:  { productId: 'product-5643e6', name: 'Pro 年付',  price: 1788, soldOut: true },
+            max:  { productId: 'product-d46f8b', name: 'Max 年付',  price: 5628, soldOut: true }
+        }
+    };
+
+    // 用 batch-preview 响应动态更新 PRODUCTS
+    function updateProductsFromBatchPreview(productList) {
+        if (!Array.isArray(productList)) return;
+        var updated = 0;
+        productList.forEach(function (p) {
+            var staticInfo = PRODUCT_STATIC[p.productId];
+            if (!staticInfo) return;
+            var target = PRODUCTS[staticInfo.unit] && PRODUCTS[staticInfo.unit][staticInfo.type];
+            if (!target) return;
+            target.price = p.originalAmount || target.price;
+            target.payAmount = p.payAmount;
+            target.soldOut = !!p.soldOut;
+            target.renewAmount = p.renewAmount;
+            updated++;
+        });
+        log('产品', '已更新 ' + updated + ' 个产品价格/库存');
+    }
+
+    // ==================== 配置 ====================
+    var CONFIG = {
+        BUY_TIME_DEFAULT: '09:59:59',
+        PACKAGE_TYPE_DEFAULT: 'quarter',
+        TIER_DEFAULT: 'max',
+        INVITATION_CODE: 'XYXVH4BD28',
+        CAPTCHA_APP_ID: '196026326',
+        OCR_BACKEND: 'ddddocr',
+        DDDDOCR_URL: 'http://127.0.0.1:9898/click',
+        CAPTCHA_MAX_RETRY: 10,
+        // 555 繁忙时复用同一有效 ticket 的即时重发次数（0=关闭）。抢购高峰大量返回 555，
+        // 复用有效 token 重发比重新解验证码快得多，是提升命中率的关键。可按需调整。
+        RETRY_ON_BUSY: 2,
+        RETRY_INTERVAL: 300,
+        // 预存 token 之间 preview 请求间隔（ms）——兜底串行路径使用；到点主路径为并发爆发，不受此值影响
+        PRECACHE_INTERVAL: 1800,
+        // 自动预存的目标 token 数量。到点「并发爆发」时多个 token 同时打 preview，
+        // 数量越多命中率越高，但过多可能触发验证码频率限制，3 个为均衡默认值。
+        AUTO_PRECACHE_COUNT: 3,
+        ENABLE_MANUAL_BIZID: false
+    };
+
+    // ==================== 状态 ====================
+    var state = {
+        running: false,
+        timer: null,
+        captchaHandling: false,
+        userInfo: null,
+        customerNumber: null,
+        customerName: '',
+        cachedTokens: [],
+        lockOrderDone: false,
+        lockOrderInProgress: false,
+        precacheRunning: false,
+        lastSoldOut: false
+    };
+
+    // ==================== 服务器时间同步 ====================
+    var serverTimeOffset = 0; // ms, positive = server ahead
+    var NETWORK_COMPENSATION = 30; // ms，提前量补偿（略微提前触发以覆盖发包链路耗时）
+
+    // 兜底：基于 Date 头 + RTT/2 的中位数估计（精度受 Date 头秒级分辨率限制，约 ±500ms）
+    async function measureServerOffset() {
+        var offsets = [];
+        for (var i = 0; i < 5; i++) {
+            try {
+                var t0 = performance.now();
+                var wallBefore = Date.now();
+                var resp = await fetch(location.origin + '/', {
+                    method: 'HEAD', credentials: 'include', cache: 'no-store'
+                });
+                var t1 = performance.now();
+                var dateStr = resp.headers.get('Date');
+                if (!dateStr) continue;
+                var serverTs = new Date(dateStr).getTime();
+                var rtt = t1 - t0;
+                var localMid = wallBefore + rtt / 2;
+                offsets.push(serverTs - localMid);
+            } catch (e) {
+                log('时间同步', '采样失败: ' + e.message);
+            }
+            if (i < 4) await sleep(300);
+        }
+        if (offsets.length === 0) return null;
+        offsets.sort(function(a, b) { return a - b; });
+        return offsets[Math.floor(offsets.length / 2)];
+    }
+
+    // 毫秒级同步：Date 头只有秒级分辨率，但「秒值翻变」的那一刻精确对应服务器整秒边界。
+    // 高频探测捕捉 Date 头从第 N 秒跳到 N+1 秒的瞬间，即可把 offset 精度从 ±500ms 提升到几十 ms。
+    // 取多次翻秒事件的中位数抗抖动。返回 null 表示未捕捉到翻秒（交由中位数法兜底）。
+    async function measureServerOffsetPrecise() {
+        var samples = [];
+        var prevSec = null;      // 上一次采样的服务器整秒（单位：秒）
+        var prevRecvLocal = null; // 上一次采样本地接收时刻（ms）
+        var deadline = Date.now() + 8000; // 最多探测 8s
+
+        while (Date.now() < deadline && samples.length < 5) {
+            var resp;
+            try {
+                resp = await fetch(location.origin + '/', {
+                    method: 'HEAD', credentials: 'include', cache: 'no-store'
+                });
+            } catch (e) {
+                await sleep(20);
+                continue;
+            }
+            var recvLocal = Date.now();
+            var dateStr = resp.headers.get('Date');
+            if (!dateStr) { await sleep(20); continue; }
+
+            var serverSec = Math.floor(new Date(dateStr).getTime() / 1000);
+            if (prevSec !== null && serverSec === prevSec + 1) {
+                // 翻秒发生在 [prevRecvLocal, recvLocal] 之间，取中点作为本地边界时刻估计
+                var boundaryLocal = (prevRecvLocal + recvLocal) / 2;
+                var serverBoundaryMs = serverSec * 1000; // 服务器进入该整秒的 epoch 时刻
+                samples.push(serverBoundaryMs - boundaryLocal);
+            }
+            prevSec = serverSec;
+            prevRecvLocal = recvLocal;
+            // 快轮询以尽量贴近翻秒沿
+            await sleep(15);
+        }
+
+        if (samples.length === 0) return null;
+        samples.sort(function (a, b) { return a - b; });
+        return samples[Math.floor(samples.length / 2)];
+    }
+
+    async function syncServerTime() {
+        var precise = true;
+        var offset = await measureServerOffsetPrecise();
+        if (offset === null) {
+            precise = false;
+            log('时间同步', '未捕捉到翻秒沿，回退到 Date 头中位数法');
+            offset = await measureServerOffset();
+        }
+        if (offset === null) offset = 0;
+
+        // 提前量补偿方向修正：getServerTime 需比真实服务器时间「更快」NETWORK_COMPENSATION 毫秒，
+        // 这样自旋触发条件 getServerTime()>=target 会在真实服务器 target-NETWORK_COMPENSATION 时满足，
+        // 从而提前发包覆盖链路耗时。此前用减号会导致晚发 NETWORK_COMPENSATION 毫秒（与意图相反）。
+        serverTimeOffset = offset + NETWORK_COMPENSATION;
+        var direction = offset > 0 ? '服务器快' : '本机快';
+        log('时间同步', (precise ? '[毫秒级] ' : '[秒级兜底] ') + 'offset=' + offset.toFixed(0) + 'ms (' + direction + Math.abs(offset).toFixed(0) + 'ms)，提前' + NETWORK_COMPENSATION + 'ms开抢');
+        // 面板上永久显示偏移量
+        var offsetEl = document.getElementById('v2-time-offset');
+        if (offsetEl) {
+            offsetEl.textContent = (offset > 0 ? '+' : '') + (offset / 1000).toFixed(2) + 's';
+            offsetEl.title = '时钟偏移: ' + direction + Math.abs(offset).toFixed(0) + 'ms (' + (precise ? '毫秒级翻秒探测' : '秒级兜底') + ')';
+        }
+    }
+
+    function getServerTime() {
+        return Date.now() + serverTimeOffset;
+    }
+
+    // ==================== 连接预热 ====================
+    var preheatTimer = null;
+
+    function startConnectionPreheat() {
+        if (preheatTimer) return;
+        log('预热', '开始连接预热 (每2s一次 batch-preview)');
+        preheatTimer = setInterval(function() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/biz/pay/batch-preview');
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.send(JSON.stringify({ invitationCode: getQueryString('ic') || CONFIG.INVITATION_CODE }));
+        }, 2000);
+    }
+
+    function stopConnectionPreheat() {
+        if (preheatTimer) {
+            clearInterval(preheatTimer);
+            preheatTimer = null;
+            log('预热', '停止连接预热');
+        }
+    }
+
+    var TOKEN_MAX_AGE = 180000;
+
+    // ==================== 持久化存储（GM 优先，fallback localStorage） ====================
+    function saveSetting(key, value) {
+        console.log('[v2-storage] save', key, '=', value, '| GM_setValue?', typeof GM_setValue !== 'undefined');
+        try { if (typeof GM_setValue !== 'undefined') GM_setValue(key, value); } catch (e) { console.warn('[v2-storage] GM_setValue fail', key, e); }
+        try { localStorage.setItem(key, String(value)); } catch (e) { console.warn('[v2-storage] localStorage.setItem fail', key, e); }
+    }
+    function loadSetting(key, defaultVal) {
+        var val = null;
+        var gmVal = null;
+        var lsVal = null;
+        try { if (typeof GM_getValue !== 'undefined') gmVal = GM_getValue(key); } catch (e) {}
+        try { lsVal = localStorage.getItem(key); } catch (e) {}
+        val = (gmVal !== null && gmVal !== undefined) ? gmVal : lsVal;
+        var result = (val !== null && val !== undefined) ? val : defaultVal;
+        console.log('[v2-storage] load', key, '| GM=', gmVal, '| LS=', lsVal, '| default=', defaultVal, '→ result=', result);
+        return result;
+    }
+
+
+    // ==================== 工具函数 ====================
+    function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+    function log(tag, msg) {
+        var time = new Date().toLocaleTimeString();
+        console.log('[' + time + '][' + tag + '] ' + msg);
+    }
 
     function getQueryString(name) {
-        var reg = new RegExp("(^|&)" + name + "=([^&]*)(&|$)", "i");
+        var reg = new RegExp('(^|&)' + name + '=([^&]*)(&|$)', 'i');
         var r = window.location.search.substr(1).match(reg);
-        if (r != null) return decodeURI(r[2]);
-        return null;
+        return r ? decodeURI(r[2]) : null;
     }
 
-    function getQueryObject(queryString) {
-      var query = {};
-      if (queryString) {
-        const params = queryString.replace(/^\?/, '').split("&");
-        for (let param of params) {
-          const [key, value] = param.split("=");
-          query[key] = decodeURIComponent(value);
+    // ==================== Auth ====================
+    // Token 存在 cookie: bigmodel_token_production
+    // OrgId / ProjectId 存在 localStorage
+    var AUTH_COOKIE_KEY = 'bigmodel_token_production';
+    var ORG_LS_KEY = 'Bigmodel-Organization';
+    var PROJECT_LS_KEY = 'Bigmodel-Project';
+
+    function getCookie(name) {
+        var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
+        return m ? decodeURIComponent(m[1]) : '';
+    }
+
+    function getAuthHeaders() {
+        var token = getCookie(AUTH_COOKIE_KEY);
+        var orgId = localStorage.getItem(ORG_LS_KEY) || '';
+        var projectId = localStorage.getItem(PROJECT_LS_KEY) || '';
+        var headers = { 'Content-Type': 'application/json' };
+        if (token) {
+            headers['Authorization'] = token;
+            headers['Bigmodel-Organization'] = orgId;
+            headers['Bigmodel-Project'] = projectId;
         }
-      }
-      return query;
+        return headers;
     }
 
-    function getQueryString2(url, name) {
-        var reg = new RegExp("(^|&)" + name + "=([^&]*)(&|$)", "i");
-        var r = new URL(url).search.substr(1).match(reg);
-        if (r != null) return decodeURI(r[2]);
-        return null;
-    }
-
-    win.getQueryString = getQueryString;
-    win.getQueryString2 = getQueryString2;
-    win.getQueryObject = getQueryObject;
-
-
-
-
-
-// ==================== API 响应拦截 ====================
-// 直接拦截 /biz/pay/preview 的 XHR 响应，比读 Vue 响应式状态可靠得多
-// Vue 中 isSoldOut 默认值是 true，API 响应前不可靠
-var lastPreviewResult = null;
-var retryingPreview = false;
-
-// ── 测试模式 ──
-// 设为 0 关闭测试；设为 N>0 则前 N 次按序返回：555繁忙 → 200售罄 → 200成功
-// 之后恢复正常。推荐值 3。
-var TEST_PREVIEW_COUNT = 0;
-
-// ── 555 繁忙自动重试 ──
-// 验证码通过后 API 返回 555 时，直接重发请求（验证码 token 仍有效）
-// 设为 0 关闭；设为 N 则最多重试 N 次，全部失败才提示繁忙
-var RETRY_ON_BUSY = 0;
-var RETRY_INTERVAL = 300; // 重试间隔(ms)
-
-// ── 预解题状态 ──
-var captchaPreSolved = false;       // 验证码汉字已点选，未确认
-var captchaPreOpenAttempted = false; // 已尝试提前点击购买按钮
-// preview 成功后直接调 create-sign，跳过 pay-middle-page 延迟
-var autoLockEnabled = false;
-var lockOrderInProgress = false;
-var lockOrderDone = false;
-
-function setupAPIInterceptor() {
-    var origOpen = XMLHttpRequest.prototype.open;
-    var origSend = XMLHttpRequest.prototype.send;
-    var origSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-
-    // 获取 XHR 原型上的原始 getter（用于读取真实响应，绕过我们的覆盖）
-    var protoGetResponseText, protoGetResponse;
-    try {
-        protoGetResponseText = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'responseText').get;
-        protoGetResponse = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response').get;
-    } catch (e) {
-        console.warn('[拦截] 无法获取 XHR 原型 getter');
-    }
-
-    XMLHttpRequest.prototype.open = function(method, url) {
-        this._autoBuyUrl = (typeof url === 'string') ? url : '';
-        return origOpen.apply(this, arguments);
-    };
-
-    // 捕获请求头，供重试时复用
-    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
-        if (!this._autoBuyHeaders) this._autoBuyHeaders = {};
-        this._autoBuyHeaders[name] = value;
-        return origSetRequestHeader.apply(this, arguments);
-    };
-
-    XMLHttpRequest.prototype.send = function(body) {
-        if (this._autoBuyUrl.indexOf('/biz/pay/preview') !== -1 && !this._autoBuyRetry) {
-            var xhr = this;
-            var requestBody = body;
-            var testOverrideText = null;  // 测试模式假响应
-            var vueModifiedText = null;   // 缓存：555→1505 转换后的响应
-
-            // ── 随机请求指纹 ──
-            try {
-                xhr.setRequestHeader('X-Request-Id', Math.random().toString(36).slice(2, 15));
-                xhr.setRequestHeader('X-Timestamp', String(Date.now()));
-                var _q = (0.5 + Math.random() * 0.5).toFixed(1);
-                xhr.setRequestHeader('Accept-Language', 'zh-CN,zh;q=' + _q + ',en;q=' + (_q * 0.7).toFixed(1));
-            } catch(e) {}
-
-            // ── 测试模式：生成假响应 ──
-            if (TEST_PREVIEW_COUNT > 0) {
-                if (typeof window.__testPreviewSeq === 'undefined') window.__testPreviewSeq = 0;
-                window.__testPreviewSeq++;
-
-                if (window.__testPreviewSeq <= TEST_PREVIEW_COUNT) {
-                    switch (window.__testPreviewSeq) {
-                        case 1:
-                            testOverrideText = JSON.stringify({code: 555, msg: "繁忙", success: false});
-                            break;
-                        case 2:
-                            testOverrideText = JSON.stringify({code: 200, msg: "操作成功", success: true, data: {soldOut: true}});
-                            break;
-                        default:
-                            testOverrideText = JSON.stringify({
-                                code: 200, msg: "操作成功", success: true,
-                                data: {
-                                    productId: "product-5d3a03", soldOut: false,
-                                    originalAmount: 1407, payAmount: 1266.3,
-                                    thirdPartyAmount: 1266.3, bizId: "TEST" + Date.now(),
-                                    renewAmount: 1266.3
-                                }
-                            });
-                    }
-                    console.log('[测试] 第' + window.__testPreviewSeq + '次 → ' +
-                        (window.__testPreviewSeq === 1 ? '555 繁忙' :
-                         window.__testPreviewSeq === 2 ? '200 售罄' : '200 成功'));
-                }
+    // ==================== API 调用 ====================
+    function apiRequest(method, url, data) {
+        return new Promise(function (resolve, reject) {
+            var xhr = new XMLHttpRequest();
+            xhr.open(method, '/api' + url);
+            var headers = getAuthHeaders();
+            for (var key in headers) {
+                xhr.setRequestHeader(key, headers[key]);
             }
-
-            // ── 覆盖 responseText / response ──
-            // 将 555 响应转为 code 1505（axios 白名单 [200,1505,1005]）
-            // Vue 的 payPreviewFn 对 1505 不做任何处理，从而阻止繁忙弹窗出现
-            if (protoGetResponseText && protoGetResponse) {
+            // 构造带上下文的拒绝错误：附带 HTTP 状态码(status)、原始响应文本(body)、
+            // 尽力解析出的 JSON(raw)，供调用方精确区分「ticket 失效/鉴权拒绝」与「繁忙」。
+            function rejectWith(message, status, text) {
+                var err = new Error(message);
+                err.status = status;
+                err.body = (text != null) ? text : null;
+                try { err.raw = text ? JSON.parse(text) : null; } catch (e) { err.raw = null; }
+                reject(err);
+            }
+            xhr.onload = function () {
+                // HTTP 非 200（401/403/405/500/502…）→ 服务器拒绝：ticket 或鉴权多已失效，
+                // 不应再用同一 ticket 重试。业务级「繁忙(555)」由后端以 HTTP 200 + body.code
+                // 返回，会走下面的 resolve 分支，交由上层重试逻辑处理。
+                if (xhr.status !== 200) {
+                    rejectWith('HTTP ' + xhr.status, xhr.status, xhr.responseText);
+                    return;
+                }
                 try {
-                    Object.defineProperty(xhr, 'responseText', {
-                        get: function() {
-                            if (vueModifiedText !== null) return vueModifiedText;
-                            var raw = testOverrideText !== null ? testOverrideText : protoGetResponseText.call(xhr);
-                            try {
-                                if (JSON.parse(raw).code === 555) {
-                                    vueModifiedText = JSON.stringify({code: 1505, msg: '', success: false});
-                                    return vueModifiedText;
-                                }
-                            } catch (e) {}
-                            return raw;
-                        }
-                    });
-                    Object.defineProperty(xhr, 'response', {
-                        get: function() {
-                            if (vueModifiedText !== null) return vueModifiedText;
-                            var raw = testOverrideText !== null ? testOverrideText : protoGetResponse.call(xhr);
-                            try {
-                                if (JSON.parse(raw).code === 555) {
-                                    vueModifiedText = JSON.stringify({code: 1505, msg: '', success: false});
-                                    return vueModifiedText;
-                                }
-                            } catch (e) {}
-                            return raw;
-                        }
-                    });
+                    resolve(JSON.parse(xhr.responseText));
                 } catch (e) {
-                    console.warn('[拦截] 无法覆盖 responseText:', e);
+                    // HTTP 200 但响应非 JSON（被 WAF/网关替换为 HTML 登录/错误页等）→ 视为拒绝
+                    rejectWith('非JSON响应: HTTP ' + xhr.status, xhr.status, xhr.responseText);
                 }
-            }
-
-            // ── load 事件：读取真实响应用于自身逻辑 ──
-            xhr.addEventListener('load', function() {
-                try {
-                    var resp;
-                    if (testOverrideText !== null) {
-                        resp = JSON.parse(testOverrideText);
-                    } else if (protoGetResponseText) {
-                        resp = JSON.parse(protoGetResponseText.call(xhr));
-                    } else {
-                        resp = JSON.parse(xhr.responseText);
-                    }
-
-                    // 555 繁忙 → 自动重发请求（验证码 token 仍有效，无需重新识别）
-                    if (resp.code === 555 && RETRY_ON_BUSY > 0 && testOverrideText === null) {
-                        console.log('[拦截] 555繁忙，启动自动重试 (最多' + RETRY_ON_BUSY + '次)');
-                        retryingPreview = true;
-                        retryPreview(requestBody, xhr._autoBuyHeaders, RETRY_ON_BUSY);
-                        return;
-                    }
-
-                    lastPreviewResult = resp;
-
-                    handlePreviewResponse(resp);
-                } catch (e) {
-                    console.warn('[拦截] 解析响应失败:', e);
-                }
-            });
-        }
-        return origSend.apply(this, arguments);
-    };
-    console.log('[拦截] /biz/pay/preview 拦截器已安装' +
-        (TEST_PREVIEW_COUNT > 0 ? ' (测试: 555繁忙 → 200售罄 → 200成功)' : '') +
-        (RETRY_ON_BUSY > 0 ? ' (555重试: ' + RETRY_ON_BUSY + '次)' : ''));
-}
-
-// 555 繁忙时自动重发请求
-function retryPreview(requestBody, headers, maxRetries) {
-    (async function() {
-        for (var i = 0; i < maxRetries; i++) {
-            await sleep(RETRY_INTERVAL);
-            vueApp.$message('[爆破] 第' + (i + 1) + '/' + maxRetries + '次...');
-
-            try {
-                var result = await sendPreviewRequest(requestBody, headers);
-                console.log('[重试] 响应: code=' + result.code +
-                    (result.data ? (result.data.soldOut ? ' 售罄' : ' 有货!') : ''));
-
-                if (result.code === 200 && result.data) {
-                    if (!result.data.soldOut) {
-                        // 重试成功！手动触发 Vue 支付流程
-                        lastPreviewResult = result;
-                        var payRef = win.vueApp?.$refs?.payComponentRef;
-                        if (payRef) {
-                            payRef.isServerBusy = false;
-                            payRef.isSoldOut = false;
-                            payRef.captchaVerified = true;
-                            setTimeout(function() { payRef.priceData = result.data; }, 100);
-                            try { payRef.getPayStatusFn(); } catch(e) {}
-                        }
-                        console.log('[重试] 抢购成功！');
-                        retryingPreview = false;
-                        return;
-                    } else {
-                        // 售罄
-                        lastPreviewResult = result;
-                        handlePreviewResponse(result);
-                        retryingPreview = false;
-                        return;
-                    }
-                }
-                // 555 → 继续重试（验证码 token 可能仍有效）
-            } catch (e) {
-                // 405 / 非 JSON / 网络错误 → 服务器拒绝，验证码已失效，立即放弃重试
-                console.warn('[重试] 服务器拒绝 (HTTP ' + (e.status || '?') + ')，停止重试，重新输入验证码');
-                break;
-            }
-        }
-
-        // 全部重试失败或被拒绝
-        console.log('[重试] 结束，交给 autoPay 重新购买');
-        lastPreviewResult = {code: 555, msg: '繁忙', success: false};
-        handlePreviewResponse(lastPreviewResult);
-        retryingPreview = false;
-    })();
-}
-
-// 发送 /biz/pay/preview 请求（不经过拦截器）
-function sendPreviewRequest(body, headers) {
-    return new Promise(function(resolve, reject) {
-        var xhr = new XMLHttpRequest();
-        xhr._autoBuyRetry = true; // 标记为重试，跳过拦截器
-        xhr.open('POST', '/api/biz/pay/preview');
-        if (headers) {
-            for (var name in headers) {
-                try { xhr.setRequestHeader(name, headers[name]); } catch(e) {}
-            }
-        }
-        // 随机请求指纹 — 每次请求看起来不同，降低被识别为脚本的概率
-        try {
-            xhr.setRequestHeader('X-Request-Id', Math.random().toString(36).slice(2, 15));
-            xhr.setRequestHeader('X-Timestamp', String(Date.now()));
-            var _q = (0.5 + Math.random() * 0.5).toFixed(1);
-            xhr.setRequestHeader('Accept-Language', 'zh-CN,zh;q=' + _q + ',en;q=' + (_q * 0.7).toFixed(1));
-        } catch(e) {}
-        xhr.onload = function() {
-            // HTTP 非 200（如 405）→ 服务器拒绝，验证码已失效
-            if (xhr.status !== 200) {
-                reject({status: xhr.status, msg: 'HTTP ' + xhr.status});
-                return;
-            }
-            try {
-                let rpd = JSON.parse(xhr.responseText);
-                resolve(rpd);
-            } catch(e) {
-                // 非 JSON 响应（HTML 错误页）→ 同样视为拒绝
-                reject({status: xhr.status, msg: '非JSON响应'});
-            }
-        };
-        xhr.onerror = function() { reject({status: 0, msg: 'network error'}); };
-        xhr.send(body);
-    });
-}
-
-function handlePreviewResponse(resp) {
-    var payRef = win.vueApp?.$refs?.payComponentRef;
-    if (resp.code === 555) {
-        // 繁忙：responseText 已被转为 code 1505，Vue 不会弹出繁忙弹窗
-        // 此处同步关闭弹窗（XHR load 事件先于 axios microtask）
-        if (payRef) {
-            payRef.payDialogVisible = false;
-            payRef.captchaVerified = false;
-            payRef.isServerBusy = false;
-        }
-        win.vueApp?.$message({ message: '抢购人数太多,继续抢购...', type: 'warning', duration: 1500 });
-    } else if (resp.code === 500) {
-        // 服务端500：重置验证码状态，允许重新弹出验证码
-        if (payRef) {
-            payRef.payDialogVisible = false;
-            payRef.captchaVerified = false;
-            payRef.isServerBusy = false;
-        }
-        win.vueApp?.$message({ message: '服务器错误(500)，继续抢购...', type: 'warning', duration: 1500 });
-    } else if (resp.code === 200 && resp.data && resp.data.soldOut) {
-        // 售罄：Vue 已自动关闭弹窗并弹出 warning
-        win.vueApp?.$message({ message: '已售罄，继续抢购...', type: 'warning', duration: 1500 });
-    }
-    // 成功（code 200, !soldOut）：不干预，让 Vue 正常弹出支付弹窗
-}
-
-// ==================== 配置 ====================
-// BUY_TIME 改为从面板输入框读取，此变量仅作默认值
-var BUY_TIME_DEFAULT = '09:59:59';
-// 抢购按钮选择：0=第一个(Lite), 1=第二个(Pro), 2=第三个(Max)
-var buyBtnIndex = 2;
-// 套餐类型：'month'=月, 'quarter'=季, 'year'=年
-var PACKAGE_TYPE_DEFAULT = 'quarter';
-// 邀请码（自动替换URL中的ic参数）
-var INVITATION_CODE = 'XYXVH4BD28';
-
-// ── 验证码识别：仅支持本地 ddddocr HTTP 服务（~100ms） ──
-
-var DDDDOCR_URL = 'http://127.0.0.1:9898/click';
-
-var CAPTCHA_MAX_RETRY = 3;
-
-// ── 服务器时间同步 ──
-var serverTimeOffset = 0; // ms, positive = server ahead
-
-async function measureServerOffset() {
-    var offsets = [];
-    for (var i = 0; i < 5; i++) {
-        try {
-            var t0 = performance.now();
-            var wallBefore = Date.now();
-            var resp = await fetch(location.origin + '/', {
-                method: 'HEAD', credentials: 'include', cache: 'no-store'
-            });
-            var t1 = performance.now();
-            var dateStr = resp.headers.get('Date');
-            if (!dateStr) continue;
-            var serverTs = new Date(dateStr).getTime();
-            var rtt = t1 - t0;
-            var localMid = wallBefore + rtt / 2;
-            offsets.push(serverTs - localMid);
-        } catch (e) {
-            console.warn('[时间同步] 采样失败:', e.message);
-        }
-        if (i < 4) await sleep(300);
-    }
-    if (offsets.length === 0) return 0;
-    offsets.sort(function(a, b) { return a - b; });
-    return offsets[Math.floor(offsets.length / 2)];
-}
-
-async function syncServerTime() {
-    var offset = await measureServerOffset();
-    serverTimeOffset = offset;
-    var direction = offset > 0 ? '服务器快' : '本机快';
-    console.log('[时间同步] offset=' + offset.toFixed(0) + 'ms (' + direction + Math.abs(offset).toFixed(0) + 'ms)');
-    // 面板上永久显示偏移量
-    var offsetEl = document.getElementById('auto-buy-offset');
-    if (offsetEl) {
-        offsetEl.textContent = (offset > 0 ? '+' : '') + (offset / 1000).toFixed(2) + 's';
-        offsetEl.title = '时钟偏移: ' + direction + Math.abs(offset).toFixed(0) + 'ms';
-    }
-    win.vueApp?.$message({
-        message: '时钟偏移: ' + (offset > 0 ? '+' : '') + (offset / 1000).toFixed(3) + 's (' + direction + ')',
-        type: 'info', duration: 4000
-    });
-}
-
-function getServerTime() {
-    return Date.now() + serverTimeOffset;
-}
-
-// ── 连接预热 ──
-var preheatTimer = null;
-
-function startConnectionPreheat() {
-    if (preheatTimer) return;
-    console.log('[预热] 开始连接预热 (每2s一次 batch-preview)');
-    preheatTimer = setInterval(function() {
-        var xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/biz/pay/batch-preview');
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        xhr.send(JSON.stringify({ invitationCode: getQueryString('ic') || INVITATION_CODE }));
-    }, 2000);
-}
-
-function stopConnectionPreheat() {
-    if (preheatTimer) {
-        clearInterval(preheatTimer);
-        preheatTimer = null;
-        console.log('[预热] 停止连接预热');
-    }
-}
-
-// ==================== 检测本地验证码识别服务 ====================
-function checkLocalOcrService() {
-    var baseUrl = DDDDOCR_URL.replace(/\/click$/, '/');
-    var onError = function() {
-        vueApp.$message({ message: '未启动本地验证码识别服务（ddddocr），请先运行 captcha/ddddocr_server.py', type: 'warning', duration: 5000 });
-    };
-    var onSuccess = function() {
-        vueApp.$message({ message: '本地验证码识别服务已启动', type: 'success', duration: 3000 });
-    };
-    if (typeof GM_xmlhttpRequest !== 'undefined') {
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: baseUrl,
-            timeout: 2000,
-            onload: onSuccess,
-            onerror: onError,
-            ontimeout: onError
-        });
-    } else {
-        var controller = new AbortController();
-        var tid = setTimeout(function() { controller.abort(); }, 2000);
-        fetch(baseUrl, { mode: 'no-cors', signal: controller.signal })
-            .then(function() { clearTimeout(tid); onSuccess(); })
-            .catch(function() { clearTimeout(tid); onError(); });
-    }
-}
-
-// ==================== 控制面板 ====================
-var running = false;
-var timer = null;
-
-function createControlPanel() {
-    var panel = document.createElement('div');
-    panel.id = 'auto-buy-panel';
-    panel.innerHTML = `
-        <style>
-            #auto-buy-panel {
-                position: fixed;
-                top: 50px;
-                right: 10px;
-                z-index: 2000000022;
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                background: rgba(0,0,0,0.75);
-                color: #fff;
-                padding: 8px 14px;
-                border-radius: 8px;
-                font-size: 13px;
-                font-family: monospace;
-                user-select: none;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-                cursor: move;
-            }
-            #auto-buy-panel.dragging {
-                opacity: 0.8;
-            }
-            #auto-buy-panel .status {
-                width: 8px;
-                height: 8px;
-                border-radius: 50%;
-                background: #67c23a;
-                flex-shrink: 0;
-            }
-            #auto-buy-panel .status.paused { background: #e6a23c; }
-            #auto-buy-panel .status.idle { background: #909399; }
-            #auto-buy-btn, #auto-captcha-btn {
-                cursor: pointer;
-                color: #fff;
-                border: none;
-                border-radius: 4px;
-                padding: 4px 12px;
-                font-size: 12px;
-                font-family: monospace;
-            }
-            #auto-buy-btn { background: #409eff; }
-            #auto-buy-btn:hover { background: #66b1ff; }
-            #auto-captcha-btn { background: #67c23a; display: none; }
-            #auto-buy-panel .countdown { color: #e6a23c; font-size: 12px; }
-            #auto-buy-panel input[type="time"] {
-                width: 90px;
-                background: rgba(255,255,255,0.15);
-                color: #fff;
-                border: 1px solid rgba(255,255,255,0.3);
-                border-radius: 4px;
-                padding: 2px 6px;
-                font-size: 12px;
-                font-family: monospace;
-            }
-            #auto-buy-panel .buy-btn-group {
-                display: flex;
-                gap: 2px;
-            }
-            #auto-buy-panel .buy-btn-group label {
-                padding: 2px 8px;
-                border-radius: 4px;
-                font-size: 11px;
-                cursor: pointer;
-                background: rgba(255,255,255,0.1);
-                border: 1px solid rgba(255,255,255,0.2);
-                transition: all 0.15s;
-            }
-            #auto-buy-panel .buy-btn-group input:checked + label {
-                background: #409eff;
-                border-color: #409eff;
-            }
-            #auto-buy-panel .buy-btn-group input { display: none; }
-            #auto-buy-panel .package-group {
-                display: flex;
-                gap: 2px;
-            }
-            #auto-buy-panel .package-group label {
-                padding: 2px 6px;
-                border-radius: 4px;
-                font-size: 11px;
-                cursor: pointer;
-                background: rgba(255,255,255,0.1);
-                border: 1px solid rgba(255,255,255,0.2);
-                transition: all 0.15s;
-            }
-            #auto-buy-panel .package-group input:checked + label {
-                background: #e6a23c;
-                border-color: #e6a23c;
-            }
-            #auto-buy-panel .package-group input { display: none; }
-            #auto-buy-panel .sep {
-                width: 1px;
-                height: 18px;
-                background: rgba(255,255,255,0.2);
-            }
-            .package-card-box.auto-buy-selected {
-                border: 3px solid #e6a23c !important;
-                box-shadow: 0 0 12px rgba(230, 162, 60, 0.5) !important;
-            }
-            .switch-tab-item.auto-buy-pkg-selected {
-                border: 2px solid #e6a23c !important;
-                box-shadow: 0 0 8px rgba(230, 162, 60, 0.5) !important;
-                border-radius: 6px;
-            }
-        </style>
-        <div class="status"></div>
-        <span id="auto-buy-label">等待中</span>
-        <span id="auto-buy-countdown" class="countdown"></span>
-        <span id="auto-buy-offset" style="color:#67c23a;font-size:10px;"></span>
-        <div class="sep"></div>
-        <div class="package-group" title="套餐类型">
-            <input type="radio" name="package-type" id="pkg-month" value="month"><label for="pkg-month">月</label>
-            <input type="radio" name="package-type" id="pkg-quarter" value="quarter" checked><label for="pkg-quarter">季</label>
-            <input type="radio" name="package-type" id="pkg-year" value="year"><label for="pkg-year">年</label>
-        </div>
-        <input type="time" id="buy-time-input" step="1" value="${BUY_TIME_DEFAULT}" title="抢购时间" />
-        <div class="buy-btn-group">
-            <input type="radio" name="buy-btn" id="buy-btn-0" value="0"><label for="buy-btn-0">Lite</label>
-            <input type="radio" name="buy-btn" id="buy-btn-1" value="1"><label for="buy-btn-1">Pro</label>
-            <input type="radio" name="buy-btn" id="buy-btn-2" value="2" checked><label for="buy-btn-2">Max</label>
-        </div>
-        <button id="auto-buy-btn">暂停</button>
-        <button id="auto-captcha-btn" style="display:none;">测试验证码</button>
-        <label title="preview成功后直接调create-sign锁单，跳过pay-middle-page延迟" style="cursor:pointer;display:flex;align-items:center;gap:3px;font-size:11px;color:#e6a23c;">
-            <input type="checkbox" id="auto-lock-check" style="margin:0;" />
-            锁单
-        </label>
-        <button id="help-btn" style="background:#909399;">说明</button>
-    `;
-    document.body.appendChild(panel);
-
-    // ── 说明弹窗 ──
-    document.getElementById('help-btn').addEventListener('click', function() {
-        showHelpDialog();
-    });
-
-    // ── 拖拽功能 ──
-    var isDragging = false;
-    var dragStartX, dragStartY, panelStartX, panelStartY;
-
-    // 从缓存恢复位置
-    var savedPos = localStorage.getItem('autoBuy_panelPos');
-    if (savedPos) {
-        try {
-            var pos = JSON.parse(savedPos);
-            panel.style.left = pos.left + 'px';
-            panel.style.top = pos.top + 'px';
-            panel.style.right = 'auto';
-        } catch (e) {}
-    }
-
-    panel.addEventListener('mousedown', function(e) {
-        // 如果点击的是按钮或输入框，不触发拖拽
-        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'LABEL') {
-            return;
-        }
-        isDragging = true;
-        panel.classList.add('dragging');
-        dragStartX = e.clientX;
-        dragStartY = e.clientY;
-        var rect = panel.getBoundingClientRect();
-        panelStartX = rect.left;
-        panelStartY = rect.top;
-        e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', function(e) {
-        if (!isDragging) return;
-        var deltaX = e.clientX - dragStartX;
-        var deltaY = e.clientY - dragStartY;
-        panel.style.left = (panelStartX + deltaX) + 'px';
-        panel.style.top = (panelStartY + deltaY) + 'px';
-        panel.style.right = 'auto';
-    });
-
-    document.addEventListener('mouseup', function() {
-        if (isDragging) {
-            isDragging = false;
-            panel.classList.remove('dragging');
-            // 保存位置到缓存
-            var rect = panel.getBoundingClientRect();
-            localStorage.setItem('autoBuy_panelPos', JSON.stringify({
-                left: rect.left,
-                top: rect.top
-            }));
-        }
-    });
-
-    var btn = document.getElementById('auto-buy-btn');
-    var label = document.getElementById('auto-buy-label');
-    var statusDot = panel.querySelector('.status');
-
-    // ── 从缓存恢复设置 ──
-    var savedTime = localStorage.getItem('autoBuy_time');
-    if (savedTime) {
-        document.getElementById('buy-time-input').value = savedTime;
-    }
-    var savedPkg = localStorage.getItem('autoBuy_package') || PACKAGE_TYPE_DEFAULT;
-    var pkgRadio = document.querySelector('input[name="package-type"][value="' + savedPkg + '"]');
-    if (pkgRadio) pkgRadio.checked = true;
-    var savedBtnIdx = localStorage.getItem('autoBuy_btnIdx');
-    if (savedBtnIdx !== null) {
-        var btnRadio = document.querySelector('input[name="buy-btn"][value="' + savedBtnIdx + '"]');
-        if (btnRadio) btnRadio.checked = true;
-    }
-    var savedAutoLock = localStorage.getItem('autoBuy_autoLock');
-    if (savedAutoLock === 'true') {
-        document.getElementById('auto-lock-check').checked = true;
-    }
-
-    // ── 保存设置到缓存 ──
-    document.getElementById('buy-time-input').addEventListener('change', function() {
-        localStorage.setItem('autoBuy_time', this.value);
-    });
-    document.getElementById('auto-lock-check').addEventListener('change', function() {
-        localStorage.setItem('autoBuy_autoLock', this.checked ? 'true' : 'false');
-    });
-    document.querySelectorAll('input[name="package-type"]').forEach(function(radio) {
-        radio.addEventListener('change', function() {
-            if (this.checked) {
-                localStorage.setItem('autoBuy_package', this.value);
-                clickPagePackageTab();
-                highlightPackageTab();
-                // 切换套餐后需要等待页面卡片更新再高亮
-                setTimeout(highlightPackageCard, 500);
-            }
-        });
-    });
-    document.querySelectorAll('input[name="buy-btn"]').forEach(function(radio) {
-        radio.addEventListener('change', function() {
-            if (this.checked) {
-                localStorage.setItem('autoBuy_btnIdx', this.value);
-                highlightPackageCard();
-            }
-        });
-    });
-
-    // ── 初始化页面状态（等待页面数据加载完成）─
-    function initPageState() {
-        var claudeBox = document.querySelector('.claude-code-box');
-        var products = claudeBox?.__vue__?.allCardDataList;
-        if (!products || !Array.isArray(products) || products.length === 0) {
-            // 数据还没加载，继续等待
-            setTimeout(initPageState, 200);
-            return;
-        }
-
-        let l = document.querySelector('.claude-code-box').__vue__;
-        win.vueApp = l;
-        l.allCardDataList.forEach(n => {
-            n.soldOut = false;
-            n.canPurchase = true;
-            n.disabled = false;
-        })
-        vueApp.$message('脚本注入成功')
-        checkLocalOcrService();
-
-        highlightPackageCard();
-        clickPagePackageTab();
-        highlightPackageTab();
-        // 点击tab后等待卡片更新再高亮一次
-        console.log('点击tab后等待卡片更新再高亮一次');
-        setTimeout(highlightPackageCard, 600);
-    }
-    console.log('setTimeout(initPageState, 500);');
-    setTimeout(initPageState, 500);
-
-    btn.addEventListener('click', function () {
-        running = !running;
-        updatePanelUI();
-        if (running) {
-            // 重置锁单状态（重新开始抢购）
-            lockOrderInProgress = false;
-            lockOrderDone = false;
-            captchaPreSolved = false;
-            captchaPreOpenAttempted = false;
-            removePreSolveHint();
-            var overlay = document.getElementById('auto-lock-qr-overlay');
-            if (overlay) overlay.remove();
-            scheduleNext();
-        } else {
-            clearTimeout(timer);
-            timer = null;
-        }
-    });
-
-    var capBtn = document.getElementById('auto-captcha-btn');
-    capBtn.addEventListener('click', async function () {
-        if (!isCaptchaVisible()) {
-            console.warn('[验证码] 未检测到弹窗');
-            return;
-        }
-        // 关键：测试期间必须停掉 autoPay，否则 handleCaptcha(true) 结束后
-        // autoPay 会看到验证码还在，再调一次非测试版，导致点确认→刷新
-        running = false;
-        clearTimeout(timer);
-        timer = null;
-        updatePanelUI();
-        capBtn.disabled = true;
-        capBtn.textContent = '识别中…';
-        try {
-            await handleCaptcha(true);
-        } finally {
-            capBtn.disabled = false;
-            capBtn.textContent = '测试验证码';
-        }
-    });
-
-    function updatePanelUI() {
-        if (running) {
-            btn.textContent = '暂停';
-            statusDot.className = 'status';
-            label.textContent = '运行中';
-        } else {
-            btn.textContent = '开始';
-            statusDot.className = 'status paused';
-            label.textContent = '已暂停';
-        }
-    }
-
-    // 暴露更新方法
-    win.__autoBuyUpdateUI = function (text, state) {
-        label.textContent = text;
-        if (state === 'paused') {
-            statusDot.className = 'status paused';
-        } else if (state === 'idle') {
-            statusDot.className = 'status idle';
-        } else {
-            statusDot.className = 'status';
-        }
-    };
-
-    win.__autoBuyShowCountdown = function (text) {
-        var el = document.getElementById('auto-buy-countdown');
-        if (el) el.textContent = text;
-    };
-
-    updatePanelUI();
-}
-
-// ==================== 说明弹窗 ====================
-function showHelpDialog() {
-    // 检查是否已存在弹窗
-    if (document.getElementById('help-dialog')) return;
-
-    var dialog = document.createElement('div');
-    dialog.id = 'help-dialog';
-    dialog.innerHTML = `
-        <style>
-            #help-dialog {
-                position: fixed;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                z-index: 2000000023;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                background: rgba(0,0,0,0.5);
-            }
-            #help-dialog .help-content {
-                background: #fff;
-                border-radius: 12px;
-                padding: 24px 32px;
-                max-width: 480px;
-                max-height: 80vh;
-                overflow-y: auto;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-                font-size: 14px;
-                line-height: 1.8;
-                color: #333;
-            }
-            #help-dialog .help-title {
-                font-size: 18px;
-                font-weight: bold;
-                margin-bottom: 16px;
-                color: #409eff;
-                border-bottom: 1px solid #eee;
-                padding-bottom: 12px;
-            }
-            #help-dialog .help-item {
-                margin-bottom: 16px;
-                padding-left: 24px;
-                position: relative;
-            }
-            #help-dialog .help-item::before {
-                content: attr(data-num);
-                position: absolute;
-                left: 0;
-                color: #409eff;
-                font-weight: bold;
-            }
-            #help-dialog .help-highlight {
-                color: #e6a23c;
-                font-weight: bold;
-            }
-            #help-dialog .help-link {
-                color: #409eff;
-                text-decoration: none;
-            }
-            #help-dialog .help-link:hover {
-                text-decoration: underline;
-            }
-            #help-dialog .help-close {
-                margin-top: 20px;
-                text-align: center;
-            }
-            #help-dialog .help-close button {
-                background: #409eff;
-                color: #fff;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 32px;
-                font-size: 14px;
-                cursor: pointer;
-            }
-            #help-dialog .help-close button:hover {
-                background: #66b1ff;
-            }
-        </style>
-        <div class="help-content">
-            <div class="help-title">使用说明 <span style="font-size:12px;color:#999;font-weight:normal;">v2.0.0</span></div>
-            <div class="help-item" data-num="1.">
-                请<span class="help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="help-highlight">不要刷新</span>。选择需要的套餐后点击"开始"，到点自动抢购。请提前打开支付宝扫码支付，手速慢依然可能售罄。
-            </div>
-            <div class="help-item" data-num="2.">
-                可以将倒计时设置为当日更早的时间进行<span class="help-highlight">测试</span>，验证脚本是否正常工作。
-            </div>
-            <div class="help-item" data-num="3.">
-                验证码识别使用本地 ddddocr 服务（<span class="help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约100ms。若未启动本地服务，脚本启动时会弹出警告提示。
-            </div>
-            <div class="help-item" data-num="4.">
-                脚本原理是自动激活购买按钮，不使用暴力手段。能否抢到仍需运气，欢迎邀请好友一起参与，祝您好运！
-            </div>
-            <div class="help-item" data-num="5.">
-                <span class="help-highlight">自动锁单</span>（左上角黄色复选框）：勾选后，preview成功时会直接调create-sign接口锁单，跳过扫码→pay-middle-page的延迟。锁单成功后弹出支付宝支付二维码，扫码即可直接订阅，无需担心售罄。
-            </div>
-            <div class="help-close">
-                <p style="color:#409eff;margin-bottom:4px;">QQ交流群: <strong>981656846</strong></p>
-                <p style="color:#e6a23c;font-size:12px;margin-bottom:12px;">支持作者 👉 <a href="https://www.bigmodel.cn/glm-coding?ic=XYXVH4BD28" target="_blank" style="color:#409eff;">用邀请链接购买享5%优惠</a></p>
-                <button id="help-close-btn">我知道了</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(dialog);
-
-    // 点击关闭按钮
-    document.getElementById('help-close-btn').addEventListener('click', function() {
-        dialog.remove();
-    });
-
-    // 点击背景关闭
-    dialog.addEventListener('click', function(e) {
-        if (e.target === dialog) {
-            dialog.remove();
-        }
-    });
-}
-
-// ==================== 验证码识别面板（左上角） ====================
-function createCaptchaPanel() {
-    var panel = document.createElement('div');
-    panel.id = 'captcha-solve-panel';
-    panel.innerHTML = `
-        <style>
-            #captcha-solve-panel {
-                position: fixed;
-                top: 10px;
-                left: 10px;
-                z-index: 2000000022;
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                background: rgba(0,0,0,0.75);
-                color: #fff;
-                padding: 8px 14px;
-                border-radius: 8px;
-                font-size: 13px;
-                font-family: monospace;
-                user-select: none;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-            }
-            #solve-captcha-btn {
-                cursor: pointer;
-                background: #67c23a;
-                color: #fff;
-                border: none;
-                border-radius: 4px;
-                padding: 4px 12px;
-                font-size: 12px;
-                font-family: monospace;
-            }
-            #solve-captcha-btn:hover {
-                background: #85ce61;
-            }
-            #solve-captcha-btn:disabled {
-                background: #909399;
-                cursor: not-allowed;
-            }
-            #captcha-solve-panel label {
-                display: flex;
-                align-items: center;
-                gap: 4px;
-                cursor: pointer;
-                font-size: 12px;
-            }
-        </style>
-        <button id="solve-captcha-btn">识别验证码</button>
-        <label>
-            <input type="checkbox" id="auto-confirm-check" />
-            自动确认
-        </label>
-    `;
-    document.body.appendChild(panel);
-
-    var btn = document.getElementById('solve-captcha-btn');
-    btn.addEventListener('click', async function () {
-        if (!isCaptchaVisible()) {
-            console.warn('[验证码] 未检测到验证码弹窗');
-            btn.textContent = '无验证码';
-            setTimeout(function () { btn.textContent = '识别验证码'; }, 1500);
-            return;
-        }
-        btn.disabled = true;
-        btn.textContent = '识别中…';
-        try {
-            var autoConfirm = document.getElementById('auto-confirm-check').checked;
-            await solveCaptchaManual(autoConfirm);
-        } finally {
-            btn.disabled = false;
-            btn.textContent = '识别验证码';
-        }
-    });
-}
-
-async function solveCaptchaManual(autoConfirm) {
-    if (captchaHandling) return;
-    captchaHandling = true;
-    var panelBtn = document.getElementById('solve-captcha-btn');
-    var maxRetries = autoConfirm ? 5 : 1;
-
-    try {
-        for (var attempt = 0; attempt < maxRetries; attempt++) {
-            if (attempt > 0) {
-                if (panelBtn) panelBtn.textContent = '重试 ' + attempt + '/' + (maxRetries - 1);
-            }
-
-            // ── 识别 + 点击 ──
-            var T0 = performance.now();
-            var chars = extractCaptchaChars();
-            var url = extractCaptchaBgUrl();
-            if (!chars || !url) throw new Error('未找到提示字或背景图');
-            console.log('[验证码] #' + (attempt + 1) + ' 汉字:', chars);
-
-            var base64 = await fetchImageBase64(url);
-            var size = await getImageSize(base64);
-            var result = await recognizeCaptcha(base64, chars);
-            console.log('[验证码] OCR耗时:', (performance.now() - T0).toFixed(0) + 'ms, 结果:', result);
-
-            for (var i = 0; i < result.points.length; i++) {
-                clickOnCaptcha(result.points[i], size, null);
-                await sleep(100);
-            }
-
-            // ── 非自动确认：点完字符就结束 ──
-            if (!autoConfirm) return;
-
-            // ── 自动确认：点击确定，等待结果 ──
-            await sleep(100);
-            clickCaptchaConfirm();
-            console.log('[验证码] 已点击确定，等待结果...');
-
-            // MutationObserver 即时检测验证结果
-            var captchaResult = await waitForCaptchaResult(1000);
-
-            if (captchaResult === 'closed') {
-                console.log('[验证码] 验证成功！');
-                return;
-            }
-
-            // error 或 timeout → 刷新验证码
-            console.log('[验证码] 验证错误，准备刷新重试');
-            clickCaptchaRefresh();
-            await waitForCaptchaImageChange(extractCaptchaBgUrl(), 1000);
-            await sleep(100);
-        }
-
-        console.warn('[验证码] 重试次数用尽 (' + maxRetries + ')');
-    } catch (e) {
-        console.warn('[验证码] 手动识别失败:', e);
-    } finally {
-        captchaHandling = false;
-    }
-}
-
-function _isVerifyErrorVisible() {
-    var el = document.querySelector('.tencent-captcha-dy__verify-error-text');
-    if (!el) return false;
-    return isElementTrulyVisible(el);
-}
-
-// ==================== 自动抢购逻辑 ====================
-function getBuyTimeStr() {
-    var el = document.getElementById('buy-time-input');
-    var timeStr = el && el.value ? el.value : BUY_TIME_DEFAULT;
-    return timeStr;
-}
-
-function parseBuyTime() {
-    var parts = getBuyTimeStr().split(':');
-    return {
-        h: parseInt(parts[0], 10) || 0,
-        m: parseInt(parts[1], 10) || 0,
-        s: parseInt(parts[2], 10) || 0
-    };
-}
-
-function isBuyTimeReached() {
-    var now = new Date(getServerTime());
-    var t = parseBuyTime();
-    return now.getHours() > t.h
-        || (now.getHours() === t.h && now.getMinutes() > t.m)
-        || (now.getHours() === t.h && now.getMinutes() === t.m && now.getSeconds() >= t.s);
-}
-
-function getSecondsToBuyTime() {
-    var now = new Date(getServerTime());
-    var t = parseBuyTime();
-    var target = new Date(now);
-    target.setHours(t.h, t.m, t.s, 0);
-    if (now >= target) return 0;
-    return Math.floor((target - now) / 1000);
-}
-
-// 获取用户选择的套餐类型
-function getPackageType() {
-    var radio = document.querySelector('input[name="package-type"]:checked');
-    return radio ? radio.value : PACKAGE_TYPE_DEFAULT;
-}
-
-// 点击页面上对应的套餐 tab
-function clickPagePackageTab() {
-    var pkgType = getPackageType();
-    var tabIndex;
-    switch (pkgType) {
-        case 'month':  tabIndex = 0; break;  // 第1个 tab-item（包月）
-        case 'quarter': tabIndex = 1; break; // 第2个 tab-item（包季）
-        case 'year':   tabIndex = 2; break;  // 第3个 tab-item（包年）
-        default:       tabIndex = 1;
-    }
-    var tabItems = document.querySelectorAll('.switch-tab-box .switch-tab-item');
-    if (tabItems.length > tabIndex) {
-        var targetTab = tabItems[tabIndex];
-        if (targetTab && !targetTab.classList.contains('active')) {
-            targetTab.click();
-            console.log('[套餐切换] 已点击: ' + pkgType);
-        }
-    }
-}
-
-// 高亮页面上当前选择的档位卡片
-function highlightPackageCard() {
-    var idx = parseInt(document.querySelector('input[name="buy-btn"]:checked')?.value);
-    if (isNaN(idx)) idx = 2;
-    var cards = document.querySelectorAll('.package-card-box');
-    cards.forEach(function(card, i) {
-        if (i === idx) {
-            card.classList.add('auto-buy-selected');
-        } else {
-            card.classList.remove('auto-buy-selected');
-        }
-    });
-}
-
-// 高亮页面上当前选择的套餐 tab
-function highlightPackageTab() {
-    var pkgType = getPackageType();
-    var tabIndex;
-    switch (pkgType) {
-        case 'month':  tabIndex = 0; break;
-        case 'quarter': tabIndex = 1; break;
-        case 'year':   tabIndex = 2; break;
-        default:       tabIndex = 1;
-    }
-    var tabItems = document.querySelectorAll('.switch-tab-box .switch-tab-item');
-    tabItems.forEach(function(item, i) {
-        if (i === tabIndex) {
-            item.classList.add('auto-buy-pkg-selected');
-        } else {
-            item.classList.remove('auto-buy-pkg-selected');
-        }
-    });
-}
-
-// ==================== 验证码处理 ====================
-var captchaHandling = false;
-
-function getCaptchaRoot() {
-    return document.getElementById('tCaptchaDyMainWrap');
-}
-
-// 逐级向上检查祖先的 display / visibility / opacity / 是否出屏
-// 单独检查元素自身不够：opacity 不会继承到子元素的 computed style
-function isElementTrulyVisible(el) {
-    if (!el) return false;
-    var node = el;
-    while (node && node.nodeType === 1) {
-        var style = window.getComputedStyle(node);
-        if (style.display === 'none') return false;
-        if (style.visibility === 'hidden') return false;
-        if (parseFloat(style.opacity) === 0) return false;
-        node = node.parentElement;
-    }
-    var rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    // 出屏判定：腾讯隐藏验证码时常用 top:-10000px 的手段
-    if (rect.right <= 0 || rect.bottom <= 0) return false;
-    if (rect.left >= window.innerWidth || rect.top >= window.innerHeight) return false;
-    return true;
-}
-
-function isCaptchaVisible() {
-    // 以实际显示的背景图元素作为判据——wrap/transform 层可能残留在 DOM 里
-    var bg = document.querySelector('.tencent-captcha-dy__verify-bg-img');
-    if (!bg) return false;
-    if (!isElementTrulyVisible(bg)) return false;
-    // 必须真的有图片（关闭态时 backgroundImage 通常被清空）
-    var bgImage = bg.style.backgroundImage || '';
-    if (bgImage.indexOf('url(') === -1) return false;
-    return true;
-}
-
-// 提取提示中的汉字（过滤掉"请依次点击："等）
-function extractCaptchaChars() {
-    var el = document.querySelector('.tencent-captcha-dy__header-text');
-    if (!el) return '';
-    var text = el.textContent || '';
-    var m = text.match(/[\u4e00-\u9fa5]/g) || [];
-    // 去掉"请依次点击"5字
-    var filtered = m.filter(function (c) { return '请依次点击'.indexOf(c) < 0; });
-    return filtered.join('');
-}
-
-function extractCaptchaBgUrl() {
-    var el = document.querySelector('.tencent-captcha-dy__verify-bg-img');
-    if (!el) return null;
-    var bg = el.style.backgroundImage || '';
-    var m = bg.match(/url\(["']?([^"')]+)["']?\)/);
-    return m ? m[1] : null;
-}
-
-// 跨域取图 + 转 base64（优先用 GM_xmlhttpRequest，失败回退 fetch）
-function fetchImageBase64(url) {
-    return new Promise(function (resolve, reject) {
-        if (typeof GM_xmlhttpRequest !== 'undefined') {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: url,
-                responseType: 'blob',
-                onload: function (res) {
-                    var reader = new FileReader();
-                    reader.onloadend = function () {
-                        var b64 = String(reader.result).split(',')[1];
-                        resolve(b64);
-                    };
-                    reader.onerror = reject;
-                    reader.readAsDataURL(res.response);
-                },
-                onerror: reject
-            });
-        } else {
-            fetch(url).then(function (r) { return r.blob(); }).then(function (blob) {
-                var reader = new FileReader();
-                reader.onloadend = function () { resolve(String(reader.result).split(',')[1]); };
-                reader.onerror = reject;
-                reader.readAsDataURL(blob);
-            }).catch(reject);
-        }
-    });
-}
-
-// 获取原图尺寸（用于坐标缩放）
-function getImageSize(base64) {
-    return new Promise(function (resolve, reject) {
-        var img = new Image();
-        img.onload = function () { resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
-        img.onerror = reject;
-        img.src = 'data:image/png;base64,' + base64;
-    });
-}
-
-// 调 ddddocr 本地服务识别（~100ms）
-function recognizeCaptcha(base64, chars) {
-    return new Promise(function (resolve, reject) {
-        var payload = JSON.stringify({ image: base64, remark: chars });
-        var handleRes = function (text) {
-            try {
-                var obj = JSON.parse(text);
-                if (obj.success && obj.data && obj.data.result) {
-                    var points = obj.data.result.split('|').map(function (p) {
-                        var xy = p.split(',');
-                        return { x: parseFloat(xy[0]), y: parseFloat(xy[1]) };
-                    });
-                    resolve({ id: obj.data.id || '', points: points });
-                } else {
-                    reject(new Error('ddddocr 识别失败: ' + text));
-                }
-            } catch (e) { reject(e); }
-        };
-        var notRunning = function () {
-            reject(new Error('本地验证码识别服务未启动，请先运行 captcha/ddddocr_server.py'));
-        };
-        if (typeof GM_xmlhttpRequest !== 'undefined') {
-            GM_xmlhttpRequest({
-                method: 'POST',
-                url: DDDDOCR_URL,
-                headers: { 'Content-Type': 'application/json' },
-                data: payload,
-                onload: function (res) { handleRes(res.responseText); },
-                onerror: notRunning
-            });
-        } else {
-            fetch(DDDDOCR_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: payload
-            }).then(function (r) { return r.text(); }).then(handleRes).catch(notRunning);
-        }
-    });
-}
-
-function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-
-// 使用 MutationObserver 即时检测验证码验证结果（比轮询快数十倍）
-function waitForCaptchaResult(timeoutMs) {
-    return new Promise(function(resolve) {
-        var settled = false;
-        var observer;
-
-        function done(r) {
-            if (settled) return;
-            settled = true;
-            if (observer) observer.disconnect();
-            resolve(r);
-        }
-
-        function check() {
-            if (settled) return;
-            if (_isVerifyErrorVisible()) { done('error'); return; }
-            if (!isCaptchaVisible()) { done('closed'); return; }
-        }
-
-        observer = new MutationObserver(check);
-        var root = document.getElementById('tCaptchaDyMainWrap');
-        if (root) {
-            observer.observe(root, {
-                childList: true, subtree: true,
-                attributes: true, attributeFilter: ['style', 'class']
-            });
-        }
-        check(); // 立即检查一次
-        setTimeout(function() { done('timeout'); }, timeoutMs);
-    });
-}
-
-// 使用 MutationObserver 等待验证码背景图刷新完成
-function waitForCaptchaImageChange(prevUrl, timeoutMs) {
-    return new Promise(function(resolve) {
-        var settled = false;
-        var observer;
-
-        function done(r) {
-            if (settled) return;
-            settled = true;
-            if (observer) observer.disconnect();
-            resolve(r);
-        }
-
-        function check() {
-            if (settled) return;
-            var nu = extractCaptchaBgUrl();
-            if (nu && nu !== prevUrl) done('changed');
-        }
-
-        observer = new MutationObserver(check);
-        var bgImg = document.querySelector('.tencent-captcha-dy__verify-bg-img');
-        if (bgImg) {
-            observer.observe(bgImg, { attributes: true, attributeFilter: ['style'] });
-        }
-        check();
-        setTimeout(function() { done('timeout'); }, timeoutMs);
-    });
-}
-
-// 在坐标位置画一个红点标记，便于人工核对点击位置
-function drawClickMarker(clientX, clientY, label) {
-    var dot = document.createElement('div');
-    dot.className = '__captcha_test_marker';
-    dot.textContent = label || '';
-    dot.style.cssText = [
-        'position:fixed',
-        'left:' + (clientX - 10) + 'px',
-        'top:' + (clientY - 10) + 'px',
-        'width:20px','height:20px','border-radius:50%',
-        'background:rgba(255,0,0,0.75)','color:#fff',
-        'font:bold 12px/20px monospace','text-align:center',
-        'z-index:2147483647','pointer-events:none',
-        'box-shadow:0 0 0 2px #fff'
-    ].join(';');
-    document.body.appendChild(dot);
-}
-
-function clearClickMarkers() {
-    document.querySelectorAll('.__captcha_test_marker').forEach(function (n) { n.remove(); });
-}
-
-// 在验证码图片上按坐标模拟点击（坐标相对原图，内部自动缩放到显示尺寸）
-function clickOnCaptcha(point, imgSize, markerLabel) {
-    var bg = document.querySelector('.tencent-captcha-dy__verify-bg-img');
-    if (!bg) return;
-
-    var rect = bg.getBoundingClientRect();
-    var scaleX = rect.width / imgSize.w;
-    var scaleY = rect.height / imgSize.h;
-    var clientX = rect.left + point.x * scaleX;
-    var clientY = rect.top + point.y * scaleY;
-
-    if (markerLabel != null) drawClickMarker(clientX, clientY, markerLabel);
-    // 固定派发到 bg-img 自身：composed/elementFromPoint 会把事件传到外层，
-    // 很容易触发到"点击外侧关闭/刷新"逻辑，导致只点一次就整张图刷新
-    var target = bg;
-    // 注意：油猴沙箱中 window 是 Proxy，不是真正的 Window 实例，
-    // 传给 MouseEvent 构造函数会报 "Failed to convert value to 'Window'"，
-    // 因此直接省略 view 字段
-    var baseOpts = {
-        bubbles: true, cancelable: true,
-        clientX: clientX, clientY: clientY,
-        screenX: clientX, screenY: clientY,
-        button: 0, buttons: 1
-    };
-    var pointerOpts = Object.assign({}, baseOpts, {
-        pointerId: 1, pointerType: 'mouse', isPrimary: true,
-        width: 1, height: 1, pressure: 0.5
-    });
-    // 鼠标 + 指针 事件
-    target.dispatchEvent(new MouseEvent('mouseover', baseOpts));
-    target.dispatchEvent(new MouseEvent('mousemove', baseOpts));
-    if (window.PointerEvent) {
-        target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
-    }
-    target.dispatchEvent(new MouseEvent('mousedown', baseOpts));
-    if (window.PointerEvent) {
-        target.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
-    }
-    target.dispatchEvent(new MouseEvent('mouseup', baseOpts));
-    target.dispatchEvent(new MouseEvent('click', baseOpts));
-}
-
-function clickCaptchaConfirm() {
-    var btn = document.querySelector('.tencent-captcha-dy__verify-confirm-btn');
-    if (btn) btn.click();
-}
-
-function clickCaptchaRefresh() {
-    var btn = document.querySelector('.tencent-captcha-dy__footer-icon--refresh img');
-    if (btn) btn.click();
-}
-
-async function solveCaptchaOnce(isTest) {
-    var T0 = performance.now();
-    var chars = extractCaptchaChars();
-    var url = extractCaptchaBgUrl();
-    if (!chars || !url) throw new Error('未找到提示字或背景图');
-    console.log('[验证码] 汉字:', chars);
-
-    var t1 = performance.now();
-    var base64 = await fetchImageBase64(url);
-    var t2 = performance.now();
-    console.log('[⏱] 下载背景图:', (t2 - t1).toFixed(0) + 'ms, 大小:', base64.length);
-
-    var size = await getImageSize(base64);
-    var t3 = performance.now();
-    console.log('[⏱] 解码图片尺寸:', (t3 - t2).toFixed(0) + 'ms,', size.w + 'x' + size.h);
-
-    var result = await recognizeCaptcha(base64, chars);
-    var t4 = performance.now();
-    console.log('[⏱] OCR识别(ddddocr):', (t4 - t3).toFixed(0) + 'ms, 返回:', result);
-
-    console.log('[⏱] 首次点击前总耗时:', (t4 - T0).toFixed(0) + 'ms');
-
-    if (isTest) clearClickMarkers();
-    for (var i = 0; i < result.points.length; i++) {
-        clickOnCaptcha(result.points[i], size, isTest ? String(i + 1) : null);
-        await sleep(100);
-    }
-    var t5 = performance.now();
-    console.log('[⏱] 三次点击完成:', (t5 - t4).toFixed(0) + 'ms');
-
-    if (!isTest) {
-        clickCaptchaConfirm();
-        lastPreviewResult = null;
-        console.log('[⏱] 点击完成，等待验证结果...');
-
-        // MutationObserver 即时检测验证结果（错误/关闭），无需轮询
-        var captchaResult = await waitForCaptchaResult(1000);
-
-        if (captchaResult === 'error') {
-            console.log('[验证码] 验证失败，需刷新重试');
-            return false;
-        }
-
-        // 验证通过（closed）或超时 → 等待 API 响应
-        if (captchaResult === 'closed' || !isCaptchaVisible()) {
-            for (var w = 0; w < 40; w++) {
-                await sleep(50);
-                if (!lastPreviewResult) continue;
-
-                if (lastPreviewResult.code === 200 && lastPreviewResult.data && !lastPreviewResult.data.soldOut) {
-                    console.log('[验证码] 抢购成功！');
-                    return true;
-                }
-                console.log('[验证码] ' + (lastPreviewResult.code === 555 ? '服务器繁忙' : '售罄'));
-                return false;
-            }
-        }
-
-        return !isCaptchaVisible();
-    }
-    return false;
-}
-
-// ==================== 预解题（提前10s弹出验证码，点选汉字但不确认） ====================
-function showPreSolveHint() {
-    if (document.getElementById('pre-solve-hint')) return;
-    var hint = document.createElement('div');
-    hint.id = 'pre-solve-hint';
-    hint.innerHTML =
-        '<style>' +
-        '#pre-solve-hint {' +
-        '  position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
-        '  background:linear-gradient(135deg,#e6a23c,#f56c6c);color:#fff;' +
-        '  text-align:center;padding:10px 16px;font:bold 14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif;' +
-        '  box-shadow:0 2px 12px rgba(230,162,60,0.4);' +
-        '  cursor:pointer;user-select:none;' +
-        '}' +
-        '#pre-solve-hint:hover { filter:brightness(1.1); }' +
-        '#pre-solve-hint:active { filter:brightness(0.95); }' +
-        '</style>' +
-        '验证码已自动识别，倒计时结束后会自动点击确定。若识别有误，<u>点击此处</u>刷新并重新识别。';
-    hint.addEventListener('click', function() {
-        if (captchaHandling) return;
-        captchaPreSolved = false;
-        // 刷新验证码
-        clickCaptchaRefresh();
-        console.log('[预解题] 用户点击浮窗，刷新验证码并重新识别');
-        // 等刷新完成后再重新识别
-        setTimeout(function() {
-            if (isCaptchaVisible() && !captchaHandling && !captchaPreSolved) {
-                preSolveCaptcha();
-            }
-        }, 1500);
-    });
-    document.body.appendChild(hint);
-}
-
-function removePreSolveHint() {
-    var hint = document.getElementById('pre-solve-hint');
-    if (hint) hint.remove();
-}
-
-async function preSolveCaptcha() {
-    if (captchaHandling) return;
-    captchaHandling = true;
-    try {
-        for (var i = 0; i < CAPTCHA_MAX_RETRY; i++) {
-            if (!isCaptchaVisible()) break;
-            var chars = extractCaptchaChars();
-            var url = extractCaptchaBgUrl();
-            if (!chars || !url) { await sleep(500); continue; }
-
-            var base64 = await fetchImageBase64(url);
-            var size = await getImageSize(base64);
-            var result = await recognizeCaptcha(base64, chars);
-
-            for (var j = 0; j < result.points.length; j++) {
-                clickOnCaptcha(result.points[j], size, null);
-                await sleep(100);
-            }
-            captchaPreSolved = true;
-            showPreSolveHint();
-            console.log('[预解题] 验证码已预解，等待到点确认');
-            break;
-        }
-    } catch (e) {
-        console.warn('[预解题] 预解失败:', e);
-    } finally {
-        captchaHandling = false;
-    }
-}
-
-async function handleCaptcha(isTest) {
-    if (captchaHandling) return;
-    captchaHandling = true;
-    try {
-        var prevUrl = null;
-        for (var i = 0; i < CAPTCHA_MAX_RETRY; i++) {
-            try {
-                var ok = await solveCaptchaOnce(isTest);
-                if (ok) { console.log('[验证码] 通过'); return; }
-                if (isTest) return;
-                // 验证码已确认但 API 返回繁忙/售罄 → 腾讯验证码已关闭，无需刷新重试
-                // 直接退出，让 autoPay 重新点击购买按钮弹出新的验证码
-                if (!isCaptchaVisible()) {
-                    console.log('[验证码] 验证码已关闭（API返回繁忙/售罄），交给 autoPay 重新购买');
-                    return;
-                }
-                // 验证码还在（OCR识别失败等），刷新换图重试
-                console.log('[验证码] 未通过，刷新换图');
-                prevUrl = extractCaptchaBgUrl();
-                clickCaptchaRefresh();
-                await waitForCaptchaImageChange(prevUrl, 2000);
-                await sleep(100);
-            } catch (e) {
-                console.warn('[验证码] 第' + (i + 1) + '次失败:', e);
-                if (isTest) return;
-                // 验证码已关闭，不要重试
-                if (!isCaptchaVisible()) {
-                    console.log('[验证码] 验证码已关闭，交给 autoPay 重新购买');
-                    return;
-                }
-                clickCaptchaRefresh();
-                await waitForCaptchaImageChange(extractCaptchaBgUrl(), 2000);
-                await sleep(100);
-            }
-        }
-        console.warn('[验证码] 重试次数用尽，关闭验证码面板');
-        clickCaptchaRefresh();
-        await waitForCaptchaImageChange(extractCaptchaBgUrl(), 2000);
-    } finally {
-        captchaHandling = false;
-    }
-}
-
-// 停止抢购并标记成功
-function stopSuccess(msg) {
-    running = false;
-    clearTimeout(timer);
-    timer = null;
-    removePreSolveHint();
-    win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('抢到了！', 'paused');
-    var btn = document.getElementById('auto-buy-btn');
-    if (btn) btn.textContent = '已抢到';
-    console.log('[自动抢购] ' + msg);
-}
-
-// 检查 canvas 是否为空白（售罄时弹窗闪现空白canvas）
-function isCanvasBlank(canvas) {
-    if (!canvas || canvas.width === 0 || canvas.height === 0) return true;
-    try {
-        var ctx = canvas.getContext('2d');
-        var data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-        for (var i = 0; i < data.length; i += 4) {
-            // 检查是否有非白色非透明像素（QR码是黑色的）
-            if (data[i] < 240 || data[i + 1] < 240 || data[i + 2] < 240) {
-                return false;
-            }
-        }
-        return true;
-    } catch (e) {
-        return true;
-    }
-}
-
-// 截取官方 canvas 二维码并在新窗口展示
-function saveAndOpenQRCode(qrCanvas, payRef) {
-    try {
-        if (isCanvasBlank(qrCanvas)) {
-            console.warn('[自动抢购] 二维码canvas为空白，跳过保存（可能已售罄）');
-            return;
-        }
-        if (!payRef?.priceData?.thirdPartyAmount) {
-            console.warn('[自动抢购] 无支付金额，跳过保存（可能已售罄）');
-            return;
-        }
-        var dataUrl = qrCanvas.toDataURL('image/png');
-        var amount = payRef.priceData.thirdPartyAmount;
-        var productName = payRef.cardData?.productName || '';
-
-        console.log('[自动抢购] bizId:', payRef.priceData?.bizId);
-        console.log('[自动抢购] thirdPartyAmount:', amount);
-
-        // 新窗口展示官方二维码
-        var newWin = window.open('', '_blank');
-        if (newWin) {
-            newWin.document.write(
-                '<html><head><title>支付二维码</title></head>' +
-                '<body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5;">' +
-                '<div style="text-align:center;">' +
-                '<h2 style="color:#333;">请使用支付宝扫码支付' + (productName ? ' - ' + productName : '') + '</h2>' +
-                '<p style="color:#e6a23c;font-size:24px;font-weight:bold;">¥' + amount + '</p>' +
-                '<img src="' + dataUrl + '" style="width:300px;height:300px;border:1px solid #ddd;" />' +
-                '<p style="color:#999;font-size:14px;">请尽快扫码支付，二维码有效期有限</p>' +
-                '</div></body></html>'
-            );
-        }
-
-        // 自动下载二维码图片
-        var link = document.createElement('a');
-        link.download = 'qrcode_' + Date.now() + '.png';
-        link.href = dataUrl;
-        link.click();
-
-        console.log('[自动抢购] 二维码已保存并打开');
-    } catch (e) {
-        console.warn('[自动抢购] 保存二维码失败:', e);
-    }
-}
-
-// ==================== 自动锁单 ====================
-// preview 成功后直接调 create-sign，跳过 pay-middle-page 延迟
-
-function loadQRLibrary() {
-    if (typeof win.QRCode !== 'undefined') return;
-    var s = document.createElement('script');
-    s.src = 'https://cdn.bootcdn.net/ajax/libs/qrcode/1.5.0/qrcode.min.js';
-    s.onload = function() { console.log('[锁单] QR库加载成功'); };
-    s.onerror = function() { console.warn('[锁单] QR库加载失败'); };
-    document.head.appendChild(s);
-}
-
-function getCustomerId() {
-    try {
-        var store = win.vueApp?.$store;
-        if (store?.state?.User?.userInfo?.customerNumber) {
-            return store.state.User.userInfo.customerNumber;
-        }
-        var payRef = win.vueApp?.$refs?.payComponentRef;
-        if (payRef?.userInfo?.customerNumber) {
-            return payRef.userInfo.customerNumber;
-        }
-        var root = win.vueApp?.$root;
-        if (root?.$store?.state?.User?.userInfo?.customerNumber) {
-            return root.$store.state.User.userInfo.customerNumber;
-        }
-    } catch (e) {
-        console.warn('[锁单] 获取customerId失败:', e);
-    }
-    return null;
-}
-
-function tryLockOrder() {
-    if (lockOrderInProgress || lockOrderDone) return;
-    lockOrderInProgress = true;
-
-    var priceData = lastPreviewResult.data;
-    var customerId = getCustomerId();
-    if (!customerId) {
-        console.warn('[锁单] 无法获取customerId，放弃锁单');
-        lockOrderInProgress = false;
-        return;
-    }
-
-    var invitationCode = getQueryString('ic') || INVITATION_CODE;
-    var payload = JSON.stringify({
-        payType: 'ALI',
-        productId: priceData.productId,
-        customerId: customerId,
-        bizId: priceData.bizId,
-        invitationCode: invitationCode
-    });
-
-    console.log('[锁单] 发起create-sign, productId:', priceData.productId, 'bizId:', priceData.bizId);
-
-    var signUrl = priceData.lastSubscriptionSummary ? '/api/biz/pay/product/update/sign' : '/api/biz/pay/create-sign';
-
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', signUrl);
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.onload = function() {
-        lockOrderInProgress = false;
-        try {
-            var resp = JSON.parse(xhr.responseText);
-            console.log('[锁单] 响应:', resp.code, resp.msg || '', resp.data ? '(有data)' : '');
-            if (resp.code === 200 && resp.data && resp.data.sign) {
-                if (resp.data.code === '500' || resp.data.code === 500) {
-                    console.log('[锁单] 已订阅该套餐');
-                    lockOrderDone = true;
-                    stopSuccess('已订阅该套餐');
-                    return;
-                }
-                lockOrderDone = true;
-                stopSuccess('锁单成功！');
-                showPaymentQRPopup(resp.data.sign, priceData);
+            };
+            xhr.onerror = function () { rejectWith('网络错误', 0, null); };
+            if (data) {
+                xhr.send(JSON.stringify(data));
             } else {
-                console.log('[锁单] 失败:', resp.msg || resp.code);
-                onLockOrderFailed(resp.msg || 'create-sign失败');
+                xhr.send();
             }
-        } catch (e) {
-            lockOrderInProgress = false;
-            console.warn('[锁单] 解析响应失败:', e);
-            onLockOrderFailed('响应解析失败');
-        }
-    };
-    xhr.onerror = function() {
-        lockOrderInProgress = false;
-        console.warn('[锁单] 请求失败');
-        onLockOrderFailed('网络错误');
-    };
-    xhr.send(payload);
-}
-
-function onLockOrderFailed(msg) {
-    lockOrderDone = true;
-    lockOrderInProgress = false;
-    running = false;
-    clearTimeout(timer);
-    timer = null;
-    win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('锁单失败', 'paused');
-    var btn = document.getElementById('auto-buy-btn');
-    if (btn) btn.textContent = '锁单失败';
-    win.vueApp?.$message({ message: '锁单失败：' + msg, type: 'error', duration: 3000 });
-    console.log('[锁单] 失败，停止抢购:', msg);
-
-    // 尝试打开官方二维码，用户仍可尝试扫码（页面跳转能及时发现问题）
-    var payRef = win.vueApp?.$refs?.payComponentRef;
-    var qrCanvas = document.querySelector('.scan-qrcode-box canvas');
-    if (qrCanvas && payRef?.priceData?.thirdPartyAmount) {
-        // 修改标题标注锁单已失败
-        try {
-            var dataUrl = qrCanvas.toDataURL('image/png');
-            var amount = payRef.priceData.thirdPartyAmount;
-            var productName = payRef.cardData?.productName || '';
-            var newWin = window.open('', '_blank');
-            if (newWin) {
-                newWin.document.write(
-                    '<html><head><title>锁单失败 - 支付二维码</title></head>' +
-                    '<body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#fff3f3;">' +
-                    '<div style="text-align:center;">' +
-                    '<h2 style="color:#f56c6c;">锁单失败(' + msg + ')，以下为官方二维码（可能已售罄）</h2>' +
-                    '<p style="color:#e6a23c;font-size:24px;font-weight:bold;">¥' + amount + (productName ? ' - ' + productName : '') + '</p>' +
-                    '<img src="' + dataUrl + '" style="width:300px;height:300px;border:1px solid #ddd;" />' +
-                    '<p style="color:#999;font-size:14px;">扫码后如果提示售罄则无法支付</p>' +
-                    '</div></body></html>'
-                );
-                newWin.document.close();
-            }
-        } catch (e) {
-            console.warn('[锁单] 打开官方二维码失败:', e);
-        }
+        });
     }
-}
 
-function showQRPopup(qrDataUrl, amount, productName, subtitle, payUrl, large) {
-    var existing = document.getElementById('v1-pay-popup');
-    if (existing) existing.remove();
-    var existingOverlay = document.getElementById('v1-pay-overlay');
-    if (existingOverlay) existingOverlay.remove();
-
-    var qrSize = large ? 350 : 240;
-    var popupWidth = large ? 490 : 440;
-
-    var popup = document.createElement('div');
-    popup.id = 'v1-pay-popup';
-    popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
-        'background:#fff;border-radius:12px;padding:28px 32px;z-index:999999;min-width:340px;max-width:' + popupWidth + 'px;' +
-        'box-shadow:0 8px 30px rgba(0,0,0,0.25);text-align:center;font-family:system-ui,sans-serif;';
-    popup.innerHTML =
-        '<div style="font-size:18px;font-weight:600;color:#333;margin-bottom:8px;">抢购成功！请扫码支付</div>' +
-        '<div style="font-size:14px;color:#666;margin-bottom:4px;">' + (productName || '') + '</div>' +
-        '<div style="font-size:28px;font-weight:bold;color:#e6a23c;margin-bottom:16px;">¥' + amount + '</div>' +
-        '<div style="margin-bottom:12px;"><img src="' + qrDataUrl + '" style="width:' + qrSize + 'px;height:' + qrSize + 'px;border:1px solid #eee;border-radius:8px;" /></div>' +
-        '<div style="font-size:12px;color:#999;margin-bottom:8px;">' + (subtitle || '请尽快用支付宝扫码支付') + '</div>' +
-        (payUrl ? '<textarea readonly onclick="this.select()" style="width:100%;max-width:360px;height:48px;font-size:11px;color:#409eff;border:1px solid #ddd;border-radius:4px;padding:4px 6px;resize:none;margin-bottom:16px;word-break:break-all;line-height:1.3;outline:none;cursor:pointer;">' + payUrl + '</textarea>' : '') +
-        '<div style="display:flex;gap:10px;justify-content:center;margin-top:12px;">' +
-        '<button id="v1-pay-download" style="background:#67c23a;color:#fff;border:none;border-radius:6px;' +
-        'padding:8px 20px;font-size:14px;cursor:pointer;">下载二维码</button>' +
-        '<button id="v1-pay-close" style="background:#409eff;color:#fff;border:none;border-radius:6px;' +
-        'padding:8px 28px;font-size:14px;cursor:pointer;">关闭</button></div>';
-    document.body.appendChild(popup);
-
-    var overlay = document.createElement('div');
-    overlay.id = 'v1-pay-overlay';
-    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:999998;';
-    document.body.appendChild(overlay);
-
-    var closePopup = function () { popup.remove(); overlay.remove(); };
-    document.getElementById('v1-pay-close').onclick = closePopup;
-    overlay.onclick = null;
-
-    var dlBtn = document.getElementById('v1-pay-download');
-    if (dlBtn) {
-        dlBtn.onclick = function () {
-            var a = document.createElement('a');
-            a.href = qrDataUrl;
-            a.download = 'pay_qr_' + Date.now() + '.png';
-            a.click();
-        };
+    // 获取用户信息
+    function fetchCustomerInfo() {
+        return apiRequest('GET', '/biz/customer/getCustomerInfo');
     }
-}
 
-function showPaymentQRPopup(signUrl, priceData) {
-    var amount = priceData.thirdPartyAmount || priceData.payAmount;
-    var productName = priceData.productName || '';
+    // 批量预览（获取各产品最新价格和售卖状态）
+    function fetchBatchPreview(params) {
+        return apiRequest('POST', '/biz/pay/batch-preview', params);
+    }
 
-    function renderQR() {
-        win.QRCode.toDataURL(signUrl, { width: 600, margin: 4, errorCorrectionLevel: 'L' }, function(err, qrDataUrl) {
-            if (err) {
-                console.warn('[锁单] QR生成失败:', err);
-                win.vueApp?.$message({ message: 'QR生成失败', type: 'error', duration: 5000 });
+    // 单个产品预览（验证码通过后调用，获取 bizId）
+    function fetchPreview(params) {
+        return apiRequest('POST', '/biz/pay/preview', params);
+    }
+
+    // 查询支付状态
+    function fetchPayStatus(bizId) {
+        return apiRequest('GET', '/biz/pay/status?key=' + encodeURIComponent(bizId));
+    }
+
+    // 锁单（create-sign）
+    function tryLockOrder(previewData) {
+        return new Promise(function (resolve) {
+            if (state.lockOrderInProgress || state.lockOrderDone) {
+                resolve({ success: false, code: 'SKIP', msg: state.lockOrderDone ? '已锁单' : '锁单进行中' });
                 return;
             }
-            // 页面内弹窗
+            state.lockOrderInProgress = true;
+
+            var customerId = state.customerNumber;
+            if (!customerId) {
+                log('锁单', '无法获取 customerId');
+                state.lockOrderInProgress = false;
+                resolve({ success: false, code: 'NO_CUSTOMER', msg: '无法获取 customerId' });
+                return;
+            }
+
+            var invitationCode = getQueryString('ic') || CONFIG.INVITATION_CODE;
+            var signUrl = previewData.lastSubscriptionSummary ? '/biz/pay/product/update/sign' : '/biz/pay/create-sign';
+
+            apiRequest('POST', signUrl, {
+                payType: 'ALI',
+                productId: previewData.productId,
+                customerId: customerId,
+                bizId: previewData.bizId,
+                invitationCode: invitationCode
+            }).then(function (resp) {
+                state.lockOrderInProgress = false;
+                if (resp.code === 200 && resp.data && resp.data.sign) {
+                    state.lockOrderDone = true;
+                    log('锁单', '成功！bizId=' + previewData.bizId);
+                    resolve({ success: true, sign: resp.data.sign, raw: resp });
+                } else {
+                    log('锁单', '失败: ' + (resp.msg || resp.code));
+                    resolve({ success: false, code: resp.code, msg: resp.msg, raw: resp });
+                }
+            }).catch(function (e) {
+                state.lockOrderInProgress = false;
+                // 带上 HTTP 状态码（如 401 鉴权失效 / 500 服务端错误）与原始响应体，便于定位锁单失败原因
+                var code = e.status ? ('HTTP ' + e.status) : 'ERR';
+                log('锁单', '异常: ' + code + ' ' + e.message);
+                resolve({ success: false, code: code, msg: e.message, raw: e.raw || e.body || null });
+            });
+        });
+    }
+
+    // 展示锁单后的支付二维码
+    function showPaymentQRPopup(signUrl, priceData) {
+        var amount = priceData.thirdPartyAmount || priceData.payAmount;
+        var productName = priceData.productName || '';
+
+        // @require 加载的 QRCode 在油猴沙箱全局，不在 unsafeWindow 上
+        var QR = (typeof QRCode !== 'undefined') ? QRCode
+            : (typeof win.QRCode !== 'undefined') ? win.QRCode : null;
+
+        if (!QR) {
+            log('支付', 'QRCode 库未就绪');
+            return;
+        }
+
+        QR.toDataURL(signUrl, {
+            width: 600, margin: 4, errorCorrectionLevel: 'L'
+        }, function (err, qrDataUrl) {
+            if (err) {
+                log('支付', 'QR生成失败: ' + err.message);
+                return;
+            }
             showQRPopup(qrDataUrl, amount, productName, '锁单成功！请用支付宝扫码支付', signUrl, true);
             // 自动下载二维码
             var a = document.createElement('a');
@@ -2111,231 +663,2240 @@ function showPaymentQRPopup(signUrl, priceData) {
             try {
                 var w = window.open('', '_blank');
                 if (w) {
-                    w.document.write(
-                        '<html><head><title>锁单成功 - 支付宝扫码支付</title><style>' +
-                        'body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f5;}' +
-                        'img{width:350px;height:350px;border:2px solid #eee;border-radius:8px;}' +
-                        'h2{color:#333;}.price{color:#e6a23c;font-size:28px;font-weight:bold;}' +
-                        '.tip{color:#999;font-size:14px;margin-top:12px;}' +
-                        '</style></head>' +
-                        '<body><div style="text-align:center;">' +
-                        '<h2>锁单成功！请用支付宝扫码</h2>' +
-                        '<p class="price">&yen;' + amount + (productName ? ' - ' + productName : '') + '</p>' +
-                        '<img src="' + qrDataUrl + '" />' +
-                        '<p class="tip">请尽快用支付宝扫码支付</p>' +
-                        '</div></body></html>'
-                    );
+                    w.document.write('<html><head><title>抢购成功 - 请扫码支付</title></head><body style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;font-family:system-ui,sans-serif;background:#f5f5f5;">' +
+                        '<h2 style="color:#333;">抢购成功！请扫码支付</h2>' +
+                        '<p style="color:#666;">' + (productName || '') + '　<strong style="color:#e6a23c;font-size:24px;">¥' + amount + '</strong></p>' +
+                        '<img src="' + qrDataUrl + '" style="width:350px;height:350px;border:2px solid #eee;border-radius:8px;" />' +
+                        '<p style="color:#999;font-size:13px;margin-top:12px;">请尽快用支付宝扫码支付</p>' +
+                        '</body></html>');
                     w.document.close();
                 }
             } catch (e) {}
-            console.log('[锁单] 支付二维码已弹出');
+            log('支付', '支付二维码已弹出');
+        });
+    }
+    win.showPaymentQRPopup = showPaymentQRPopup;
+
+
+    // ==================== 验证码识别 ====================
+    function fetchImageBase64(url) {
+        return new Promise(function (resolve, reject) {
+            if (typeof GM_xmlhttpRequest !== 'undefined') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    responseType: 'blob',
+                    onload: function (res) {
+                        var reader = new FileReader();
+                        reader.onloadend = function () {
+                            resolve(String(reader.result).split(',')[1]);
+                        };
+                        reader.onerror = reject;
+                        reader.readAsDataURL(res.response);
+                    },
+                    onerror: reject
+                });
+            } else {
+                fetch(url).then(function (r) { return r.blob(); }).then(function (blob) {
+                    var reader = new FileReader();
+                    reader.onloadend = function () { resolve(String(reader.result).split(',')[1]); };
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                }).catch(reject);
+            }
         });
     }
 
-    if (typeof win.QRCode !== 'undefined') {
-        renderQR();
-    } else {
-        console.log('[锁单] QR库未就绪，等待加载...');
-        var waitCount = 0;
-        var waitTimer = setInterval(function() {
-            waitCount++;
-            if (typeof win.QRCode !== 'undefined') {
-                clearInterval(waitTimer);
-                renderQR();
-            } else if (waitCount > 50) {
-                clearInterval(waitTimer);
-                console.warn('[锁单] QR库加载超时');
-                win.vueApp?.$message({ message: 'QR库加载失败，请刷新重试', type: 'error', duration: 5000 });
+    function getImageSize(base64) {
+        return new Promise(function (resolve, reject) {
+            var img = new Image();
+            img.onload = function () { resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+            img.onerror = reject;
+            img.src = 'data:image/png;base64,' + base64;
+        });
+    }
+
+    function ddddocrRecognize(base64, chars) {
+        return new Promise(function (resolve, reject) {
+            var payload = JSON.stringify({ image: base64, remark: chars });
+            var handleRes = function (text) {
+                try {
+                    var obj = JSON.parse(text);
+                    if (obj.success && obj.data && obj.data.result) {
+                        var points = obj.data.result.split('|').map(function (p) {
+                            var xy = p.split(',');
+                            return { x: parseFloat(xy[0]), y: parseFloat(xy[1]) };
+                        });
+                        resolve({ id: obj.data.id || '', points: points });
+                    } else {
+                        reject(new Error('ddddocr fail: ' + text));
+                    }
+                } catch (e) { reject(e); }
+            };
+            if (typeof GM_xmlhttpRequest !== 'undefined') {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: CONFIG.DDDDOCR_URL,
+                    headers: { 'Content-Type': 'application/json' },
+                    data: payload,
+                    onload: function (res) { handleRes(res.responseText); },
+                    onerror: function () { reject(new Error('ddddocr 服务不可用')); }
+                });
+            } else {
+                fetch(CONFIG.DDDDOCR_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload
+                }).then(function (r) { return r.text(); }).then(handleRes).catch(function () {
+                    reject(new Error('ddddocr 服务不可用'));
+                });
             }
-        }, 100);
-    }
-}
-
-function autoPay() {
-    if (!running) return;
-
-    // 更新自动锁单开关状态
-    autoLockEnabled = document.getElementById('auto-lock-check')?.checked || false;
-
-    // 验证码处理中 或 555重试中 或 锁单中，等待
-    if (captchaHandling || retryingPreview || lockOrderInProgress) {
-        timer = setTimeout(autoPay, 100);
-        return;
+        });
     }
 
-    // 锁单已成功，不再继续抢购（stopSuccess已停止running）
-    if (lockOrderDone) return;
-
-    // 检查支付弹窗状态
-    var payRef = win.vueApp?.$refs?.payComponentRef;
-    // 成功：支付成功弹窗出现
-    if (payRef?.paySuccessDialogVisible) {
-        stopSuccess('抢到了！paySuccessDialogVisible=true');
-        return;
+    function recognizeCaptcha(base64, chars) {
+        return ddddocrRecognize(base64, chars);
     }
-    // 成功：二维码已渲染（非锁单模式下走原流程）
-    if (!autoLockEnabled) {
-        var qrCanvas = document.querySelector('.scan-qrcode-box canvas');
-        if (qrCanvas && payRef?.priceData?.thirdPartyAmount) {
-            stopSuccess('抢到了！二维码已显示');
-            saveAndOpenQRCode(qrCanvas, payRef);
+
+    // ==================== 腾讯验证码交互 ====================
+    // 核心：通过 TencentCaptcha SDK 弹出验证码，用户完成后拿到 ticket+randstr
+    // 同时尝试自动识别点选验证码
+
+    // 获取 TencentCaptcha 构造函数（兼容油猴沙箱）
+    function getTencentCaptcha() {
+        return win.TencentCaptcha || window.TencentCaptcha || null;
+    }
+
+    function loadCaptchaScript() {
+        return new Promise(function (resolve, reject) {
+            if (getTencentCaptcha()) {
+                resolve();
+                return;
+            }
+            // 页面可能已经在加载，先等一等
+            var waitCount = 0;
+            var waitTimer = setInterval(function () {
+                waitCount++;
+                if (getTencentCaptcha()) {
+                    clearInterval(waitTimer);
+                    resolve();
+                    return;
+                }
+                if (waitCount > 10) {
+                    clearInterval(waitTimer);
+                    // 手动加载
+                    var script = document.createElement('script');
+                    script.src = 'https://turing.captcha.qcloud.com/TCaptcha.js';
+                    script.onload = function () {
+                        // 等 SDK 初始化
+                        setTimeout(function () {
+                            if (getTencentCaptcha()) resolve();
+                            else reject(new Error('TencentCaptcha SDK 加载后未初始化'));
+                        }, 500);
+                    };
+                    script.onerror = function () { reject(new Error('TCaptcha.js 加载失败')); };
+                    document.head.appendChild(script);
+                }
+            }, 500);
+        });
+    }
+
+    // 弹出腾讯验证码并获取 ticket（自动识别+点击）
+    function getCaptchaTicket() {
+        return new Promise(function (resolve, reject) {
+            var TC = getTencentCaptcha();
+            if (!TC) {
+                reject(new Error('验证码SDK未加载'));
+                return;
+            }
+
+            var done = false;
+            var captchaInstance = new TC(CONFIG.CAPTCHA_APP_ID, function (res) {
+                done = true;
+                clearTimeout(safetyTimer);
+                if (res.ret === 0) {
+                    resolve({ ticket: res.ticket, randstr: res.randstr });
+                } else if (res.ret === 2) {
+                    reject(new Error('用户取消验证'));
+                } else {
+                    reject(new Error('验证失败: ret=' + res.ret));
+                }
+            }, {
+                mode: 'bind',
+                type: 'popup',
+                enableDarkMode: false,
+                timeout: 60000
+            });
+
+            captchaInstance.show();
+
+            // 兜底超时：如果 SDK 120 秒内没有回调，主动 reject
+            var safetyTimer = setTimeout(function () {
+                if (!done) {
+                    done = true;
+                    reject(new Error('验证码超时(120s)'));
+                }
+            }, 120000);
+
+            // 延时启动自动识别（等验证码弹窗渲染完成）
+            setTimeout(function () {
+                if (!done) {
+                    autoSolveCaptchaLoop(function () { return done; });
+                }
+            }, 800);
+        });
+    }
+
+    // 自动识别验证码循环
+    async function autoSolveCaptchaLoop(isDone) {
+        for (var attempt = 0; attempt < CONFIG.CAPTCHA_MAX_RETRY; attempt++) {
+            if (isDone()) return;
+
+            try {
+                log('验证码', '自动识别第 ' + (attempt + 1) + '/' + CONFIG.CAPTCHA_MAX_RETRY + ' 次');
+                await autoSolveCaptchaOnce(isDone);
+
+                // 等待结果
+                await sleep(300);
+                if (isDone()) {
+                    log('验证码', '自动识别成功');
+                    return;
+                }
+
+                // 检查是否有错误提示
+                var errorEl = document.querySelector('.tencent-captcha-dy__verify-error-text');
+                if (errorEl && isElementTrulyVisible(errorEl)) {
+                    log('验证码', '识别错误，刷新重试');
+                    var refreshBtn = document.querySelector('.tencent-captcha-dy__footer-icon--refresh img');
+                    if (refreshBtn) refreshBtn.click();
+                    await sleep(1000);
+                    continue;
+                }
+            } catch (e) {
+                log('验证码', '自动识别异常: ' + e.message);
+                if (isDone()) return;
+                await sleep(500);
+            }
+        }
+        // 所有尝试用尽，不等待手动，直接 destroy 让上层重试
+        log('验证码', '自动识别用尽，关闭验证码重新开始');
+        try {
+            var closeBtn = document.querySelector('.tencent-captcha-dy__close-btn') ||
+                document.querySelector('#tcaptcha_transform_dy .close-btn');
+            if (closeBtn) closeBtn.click();
+        } catch (e) {}
+    }
+
+    // 单次自动识别
+    async function autoSolveCaptchaOnce(isDone) {
+        var bgEl = document.querySelector('.tencent-captcha-dy__verify-bg-img');
+        if (!bgEl || !isElementTrulyVisible(bgEl)) {
+            throw new Error('验证码未显示');
+        }
+
+        var bgImage = bgEl.style.backgroundImage || '';
+        if (bgImage.indexOf('url(') === -1) {
+            throw new Error('验证码背景图未加载');
+        }
+
+        // 提取提示汉字
+        var headerEl = document.querySelector('.tencent-captcha-dy__header-text');
+        if (!headerEl) throw new Error('未找到提示文字');
+        var text = headerEl.textContent || '';
+        var allChars = text.match(/[\u4e00-\u9fa5]/g) || [];
+        var chars = allChars.filter(function (c) { return '请依次点击'.indexOf(c) < 0; }).join('');
+        if (!chars) throw new Error('未提取到汉字');
+
+        // 提取背景图 URL
+        var urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+        if (!urlMatch) throw new Error('未提取到背景图URL');
+        var bgUrl = urlMatch[1];
+
+        log('验证码', '汉字: ' + chars);
+
+        // 下载+识别
+        var t0 = performance.now();
+        var base64 = await fetchImageBase64(bgUrl);
+        var size = await getImageSize(base64);
+        var result = await recognizeCaptcha(base64, chars);
+        log('验证码', 'OCR耗时: ' + (performance.now() - t0).toFixed(0) + 'ms');
+
+        if (isDone()) return;
+
+        // 模拟点击
+        for (var i = 0; i < result.points.length; i++) {
+            if (isDone()) return;
+            clickOnCaptchaImage(bgEl, result.points[i], size);
+            await sleep(120);
+        }
+
+        // 点击确认
+        await sleep(100);
+        var confirmBtn = document.querySelector('.tencent-captcha-dy__verify-confirm-btn');
+        if (confirmBtn && !isDone()) {
+            confirmBtn.click();
+        }
+    }
+
+    // 在验证码图片上模拟点击
+    function clickOnCaptchaImage(bgEl, point, imgSize) {
+        var rect = bgEl.getBoundingClientRect();
+        var scaleX = rect.width / imgSize.w;
+        var scaleY = rect.height / imgSize.h;
+        // 点击落点带随机偏移，模拟真人点击散布（±15px），避免像素级精确点击
+        var offsetX = (Math.random() - 0.5) * 30;
+        var offsetY = (Math.random() - 0.5) * 30;
+        var clientX = rect.left + point.x * scaleX + offsetX;
+        var clientY = rect.top + point.y * scaleY + offsetY;
+
+        var baseOpts = {
+            bubbles: true, cancelable: true,
+            clientX: clientX, clientY: clientY,
+            screenX: clientX, screenY: clientY,
+            button: 0, buttons: 1
+        };
+        var pointerOpts = Object.assign({}, baseOpts, {
+            pointerId: 1, pointerType: 'mouse', isPrimary: true,
+            width: 1, height: 1, pressure: 0.5
+        });
+
+        bgEl.dispatchEvent(new MouseEvent('mouseover', baseOpts));
+        bgEl.dispatchEvent(new MouseEvent('mousemove', baseOpts));
+        if (window.PointerEvent) {
+            bgEl.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
+        }
+        bgEl.dispatchEvent(new MouseEvent('mousedown', baseOpts));
+        if (window.PointerEvent) {
+            bgEl.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
+        }
+        bgEl.dispatchEvent(new MouseEvent('mouseup', baseOpts));
+        bgEl.dispatchEvent(new MouseEvent('click', baseOpts));
+    }
+
+    function isElementTrulyVisible(el) {
+        if (!el) return false;
+        var node = el;
+        while (node && node.nodeType === 1) {
+            var style = window.getComputedStyle(node);
+            if (style.display === 'none') return false;
+            if (style.visibility === 'hidden') return false;
+            if (parseFloat(style.opacity) === 0) return false;
+            node = node.parentElement;
+        }
+        var rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        if (rect.right <= 0 || rect.bottom <= 0) return false;
+        if (rect.left >= window.innerWidth || rect.top >= window.innerHeight) return false;
+        return true;
+    }
+
+    // ==================== Token 预存管理 ====================
+    function addCachedToken(ticket, randstr) {
+        state.cachedTokens.push({
+            ticket: ticket,
+            randstr: randstr,
+            timestamp: Date.now()
+        });
+        updateTokenDisplay();
+    }
+
+    function getValidCachedTokens() {
+        var now = Date.now();
+        return state.cachedTokens.filter(function (t) {
+            return (now - t.timestamp) < TOKEN_MAX_AGE && !t.previewSent;
+        });
+    }
+
+
+    function updateTokenDisplay() {
+        var tbody = document.getElementById('v2-token-tbody');
+        if (!tbody) return;
+
+        var tokens = state.cachedTokens;
+        var html = '';
+        // 仅显示最近 5 条，倒序渲染（最新在最上）。后台 state.cachedTokens 仍保留全部
+        // token 供到点并发爆发抢购使用，此处只裁剪与反转显示，不影响抢购弹药。
+        var startIdx = Math.max(0, tokens.length - 5);
+        for (var i = tokens.length - 1; i >= startIdx; i--) {
+            var t = tokens[i];
+            var short = t.ticket.substring(0, 8);
+            var now = Date.now();
+            var expired = t.source !== '实时' && (now - t.timestamp) >= TOKEN_MAX_AGE;
+            var cls = expired ? ' v2-token-expired' : '';
+
+            // 请求时间：优先用 previewSentTime，否则用 timestamp
+            var timeStr = t.previewSentTime
+                ? new Date(t.previewSentTime).toLocaleTimeString()
+                : new Date(t.timestamp).toLocaleTimeString();
+
+            var sourceTag = t.source === '实时'
+                ? '<span class="v2-tag v2-tag-sending">实时</span>'
+                : '';
+
+            var previewText = '-';
+            if (t.previewResult) {
+                if (t.previewResult.success) previewText = '<span class="v2-tag v2-tag-ok">成功</span>';
+                else if (t.previewResult.soldOut) previewText = '<span class="v2-tag v2-tag-warn">售罄</span>';
+                else previewText = '<span class="v2-tag v2-tag-err">' + (t.previewResult.code || '?') + '</span>';
+            } else if (t.previewSent) {
+                previewText = '<span class="v2-tag v2-tag-sending">...</span>';
+            }
+
+            var lockText = '-';
+            if (t.lockResult) {
+                if (t.lockResult.success) lockText = '<span class="v2-tag v2-tag-ok">已锁</span>';
+                else {
+                    var errTag = t.lockResult.raw ? (t.lockResult.raw.code || 'ERR') : '失败';
+                    lockText = '<span class="v2-tag v2-tag-err" title="' + (t.lockResult.raw ? (t.lockResult.raw.msg || '') : '') + '">' + errTag + '</span>';
+                }
+            }
+
+            var hasDetail = t.previewResult || t.lockResult;
+            var clickAttr = hasDetail
+                ? ' style="cursor:pointer;" onclick="window.__v2ShowDetail(' + i + ')"'
+                : '';
+
+            html += '<tr class="' + cls + '"' + clickAttr + '>' +
+                '<td>' + (i + 1) + sourceTag + '</td>' +
+                '<td title="' + t.ticket + '">' + short + '</td>' +
+                '<td>' + timeStr + '</td>' +
+                '<td>' + previewText + '</td>' +
+                '<td>' + lockText + '</td>' +
+                '</tr>';
+        }
+        if (tokens.length === 0) {
+            html = '<tr><td colspan="5" class="v2-token-empty">暂无记录</td></tr>';
+        }
+        tbody.innerHTML = html;
+
+        // 最新记录在最上方，滚动条置顶以确保其可见
+        tbody.scrollTop = 0;
+    }
+
+    // 点击表格行展示详情
+    win.__v2ShowDetail = function (idx) {
+        var t = state.cachedTokens[idx];
+        if (!t) return;
+        var lines = [];
+        lines.push('=== Token #' + (idx + 1) + ' ===');
+        lines.push('ticket:  ' + t.ticket);
+        lines.push('randstr: ' + t.randstr);
+        lines.push('预存时间: ' + new Date(t.timestamp).toLocaleTimeString());
+        lines.push('');
+        if (t.previewResult) {
+            lines.push('=== Preview 响应 ===');
+            var pr = t.previewResult;
+            // 失败摘要：展示状态码与原因（如 HTTP 403 / 555 繁忙 / ERR 网络错误）
+            if (!pr.success) {
+                lines.push('结果: ' + (pr.soldOut ? '售罄' : ('失败 code=' + (pr.code || '?'))) +
+                    (pr.msg ? '  (' + pr.msg + ')' : ''));
+            }
+            // raw 可能是对象（JSON 响应）或字符串（HTML 错误页/网关页），分别处理以保证可读
+            if (pr.raw == null) {
+                lines.push('(无响应体)');
+            } else if (typeof pr.raw === 'string') {
+                lines.push(pr.raw);
+            } else {
+                lines.push(JSON.stringify(pr.raw, null, 2));
+            }
+        }
+        if (t.lockResult) {
+            lines.push('');
+            lines.push('=== 锁单结果 ===');
+            lines.push(t.lockResult.success ? '成功' : '失败: ' + (t.lockResult.msg || t.lockResult.code || '?'));
+            // raw 可能是对象（JSON）或字符串（HTML 错误页），分别处理以保证可读
+            if (t.lockResult.raw != null) {
+                lines.push(typeof t.lockResult.raw === 'string'
+                    ? t.lockResult.raw
+                    : JSON.stringify(t.lockResult.raw, null, 2));
+            }
+        }
+        var overlay = document.getElementById('v2-detail-overlay');
+        var title = document.getElementById('v2-detail-title');
+        var body = document.getElementById('v2-detail-body');
+        var footer = document.getElementById('v2-detail-footer');
+        if (overlay && title && body) {
+            title.textContent = 'Token #' + (idx + 1);
+            body.textContent = lines.join('\n');
+            overlay.style.display = 'flex';
+
+            // 详情弹窗底部按钮区域
+            if (footer) {
+                footer.innerHTML = '';
+                var sign = t.lockResult && t.lockResult.success &&
+                           t.lockResult.raw && t.lockResult.raw.data &&
+                           t.lockResult.raw.data.sign;
+                var previewData = t.previewResult && t.previewResult.raw &&
+                                  t.previewResult.raw.data;
+
+                if (sign && previewData) {
+                    // 检查 QRCode 库是否可用
+                    var QR = (typeof QRCode !== 'undefined') ? QRCode
+                        : (typeof win.QRCode !== 'undefined') ? win.QRCode : null;
+
+                    if (QR) {
+                        // QRCode 库可用 → 直接弹出支付二维码
+                        var payBtn = document.createElement('button');
+                        payBtn.textContent = '重新弹出支付二维码';
+                        payBtn.style.cssText = 'background:#e6a23c;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 24px;font-size:14px;cursor:pointer;margin:0 4px;';
+                        payBtn.addEventListener('click', function () {
+                            showPaymentQRPopup(sign, previewData);
+                        });
+                        footer.appendChild(payBtn);
+                    } else {
+                        // QRCode 库不可用 → 引导用户去在线工具生成
+                        var tipEl = document.createElement('div');
+                        tipEl.style.cssText = 'font-size:12px;color:#e6a23c;margin-bottom:8px;line-height:1.6;';
+                        tipEl.textContent = '二维码库未加载，请手动生成：';
+                        footer.appendChild(tipEl);
+
+                        var copyBtn = document.createElement('button');
+                        copyBtn.textContent = '复制 sign 链接';
+                        copyBtn.style.cssText = 'background:#409eff;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 20px;font-size:13px;cursor:pointer;margin:0 4px;';
+                        copyBtn.addEventListener('click', function () {
+                            try {
+                                navigator.clipboard.writeText(sign).then(function () {
+                                    copyBtn.textContent = '已复制!';
+                                    setTimeout(function () { copyBtn.textContent = '复制 sign 链接'; }, 2000);
+                                });
+                            } catch (e) {
+                                // fallback
+                                var ta = document.createElement('textarea');
+                                ta.value = sign;
+                                document.body.appendChild(ta);
+                                ta.select();
+                                document.execCommand('copy');
+                                ta.remove();
+                                copyBtn.textContent = '已复制!';
+                                setTimeout(function () { copyBtn.textContent = '复制 sign 链接'; }, 2000);
+                            }
+                        });
+                        footer.appendChild(copyBtn);
+
+                        var onlineBtn = document.createElement('button');
+                        onlineBtn.textContent = '在线生成二维码';
+                        onlineBtn.style.cssText = 'background:#e6a23c;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 20px;font-size:13px;cursor:pointer;margin:0 4px;';
+                        onlineBtn.addEventListener('click', function () {
+                            window.open('https://freetoolkit.cn/tools/%E4%BA%8C%E7%BB%B4%E7%A0%81%E7%94%9F%E6%88%90', '_blank');
+                        });
+                        footer.appendChild(onlineBtn);
+                    }
+                } else if (previewData && !sign) {
+                    // preview 成功但未锁单 → 打开支付页面
+                    var productInfo = PRODUCTS[getSelectedPackageType()] &&
+                        PRODUCTS[getSelectedPackageType()][getSelectedTier()];
+                    if (productInfo && previewData.bizId) {
+                        var openBtn = document.createElement('button');
+                        openBtn.textContent = '打开支付页面';
+                        openBtn.style.cssText = 'background:#409eff;color:#fff;border:none;border-radius:6px;' +
+                            'padding:8px 24px;font-size:14px;cursor:pointer;margin:0 4px;transform:translateY(-20px);';
+                        openBtn.addEventListener('click', function () {
+                            openPaymentDialog(previewData, productInfo);
+                        });
+                        footer.appendChild(openBtn);
+                    }
+                }
+            }
+        }
+    };
+
+    // 定时刷新 token 显示（检查过期状态）
+    var tokenDisplayTimer = null;
+    function startTokenDisplayRefresh() {
+        if (tokenDisplayTimer) clearInterval(tokenDisplayTimer);
+        tokenDisplayTimer = setInterval(function () {
+            if (state.cachedTokens.length > 0) {
+                updateTokenDisplay();
+            }
+        }, 10000);
+    }
+
+    async function precacheOneToken() {
+        if (!getTencentCaptcha()) {
+            log('预存', '验证码SDK未就绪');
+            return false;
+        }
+        try {
+            log('预存', '弹出验证码...');
+            var result = await getCaptchaTicket();
+            addCachedToken(result.ticket, result.randstr);
+            log('预存', '成功！ticket: ' + result.ticket.substring(0, 20) + '...');
+            return true;
+        } catch (e) {
+            log('预存', '失败: ' + e.message);
+            return false;
+        }
+    }
+
+    async function precacheTokens(count) {
+        state.precacheRunning = true;
+        updatePrecacheBtn(true);
+        for (var i = 0; i < count; i++) {
+            if (!state.precacheRunning) break;
+            var success = await precacheOneToken();
+            if (!success) {
+                log('预存', '第 ' + (i + 1) + ' 个失败，停止');
+                break;
+            }
+            log('预存', '进度: ' + (i + 1) + '/' + count);
+            if (i < count - 1) await sleep(800);
+        }
+        state.precacheRunning = false;
+        updatePrecacheBtn(false);
+    }
+
+    function updatePrecacheBtn(running) {
+        // 预存已改为默认行为，面板不再有手动预存按钮；保留空函数以兼容既有调用点
+    }
+
+    function getTargetPrecacheCount() {
+        // 预存数量已固定为默认行为，不再从面板读取
+        return CONFIG.AUTO_PRECACHE_COUNT;
+    }
+
+    function getManualBizId() {
+        var el = document.getElementById('v2-manual-bizid');
+        return el ? el.value.trim() : '';
+    }
+
+    // ==================== 锁单失败后处理 ====================
+    var PAY_AES_KEY = 'zhiPuAi123456789';
+
+    function findCryptoJS() {
+        // @require 在油猴沙箱里加载，变量名可能被隔离
+        // 尝试多种方式查找
+        var candidates = [];
+        try { candidates.push(CryptoJS); } catch (e) {}
+        try { candidates.push(win.CryptoJS); } catch (e) {}
+        try { candidates.push(window.CryptoJS); } catch (e) {}
+        try { candidates.push(unsafeWindow.CryptoJS); } catch (e) {}
+        // 尝试通过 GM 信息脚本的全局
+        try { candidates.push(self.CryptoJS); } catch (e) {}
+        for (var i = 0; i < candidates.length; i++) {
+            if (candidates[i] && candidates[i].AES && candidates[i].enc) {
+                return candidates[i];
+            }
+        }
+        return null;
+    }
+
+    function aesEncrypt(plaintext) {
+        var CryptoJS = findCryptoJS();
+        if (!CryptoJS) {
+            log('支付', 'CryptoJS 未找到，尝试内联加载...');
+            return null;
+        }
+        var key = CryptoJS.enc.Utf8.parse(PAY_AES_KEY);
+        var encrypted = CryptoJS.AES.encrypt(plaintext, key, {
+            mode: CryptoJS.mode.ECB,
+            padding: CryptoJS.pad.Pkcs7
+        });
+        return encrypted.toString();
+    }
+
+    function buildPayMiddlePageUrl(previewData) {
+        // 参考 SubscribePay.vue renderQrCode 方法：
+        // info = { productId, productName, amount, customerId, customerName, bizId, ic, payType }
+        // pay-middle-page 打开后会拿这些参数调 create-sign
+        var info = {
+            productId: previewData.productId,
+            productName: previewData.productName || previewData.productBigTitle || '',
+            amount: previewData.payAmount || previewData.thirdPartyAmount || 0,
+            customerId: state.customerNumber || '',
+            customerName: state.customerName || '',
+            bizId: previewData.bizId || '',
+            ic: getQueryString('ic') || CONFIG.INVITATION_CODE,
+            payType: 'alipay'
+        };
+        var jsonStr = JSON.stringify(info);
+        var encrypted = aesEncrypt(jsonStr);
+        if (!encrypted) return null;
+        return window.location.origin + '/pay-middle-page?info=' + encodeURIComponent(encrypted);
+    }
+
+    function showQRPopup(qrDataUrl, amount, productName, subtitle, payUrl, large) {
+        var existing = document.getElementById('v2-lockfail-popup');
+        if (existing) existing.remove();
+        var existingOverlay = document.getElementById('v2-lockfail-overlay');
+        if (existingOverlay) existingOverlay.remove();
+        var qrSize = large ? 350 : 240;
+        var popupWidth = large ? 490 : 440;
+
+        var popup = document.createElement('div');
+        popup.id = 'v2-lockfail-popup';
+        popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+            'background:#fff;border-radius:12px;padding:28px 32px;z-index:2000000030;min-width:340px;max-width:' + popupWidth + 'px;' +
+            'box-shadow:0 8px 30px rgba(0,0,0,0.25);text-align:center;font-family:system-ui,sans-serif;';
+        popup.innerHTML =
+            '<div style="font-size:18px;font-weight:600;color:#333;margin-bottom:8px;">抢购成功！请扫码支付</div>' +
+            '<div style="font-size:14px;color:#666;margin-bottom:4px;">' + (productName || '') + '</div>' +
+            '<div style="font-size:28px;font-weight:bold;color:#e6a23c;margin-bottom:16px;">¥' + amount + '</div>' +
+            '<div style="margin-bottom:12px;"><img id="v2-qr-img" src="' + qrDataUrl + '" style="width:' + qrSize + 'px;height:' + qrSize + 'px;border:1px solid #eee;border-radius:8px;" /></div>' +
+            '<div style="font-size:12px;color:#999;margin-bottom:8px;">' + (subtitle || '请尽快用支付宝扫码支付') + '</div>' +
+            (payUrl ? '<textarea readonly onclick="this.select();document.execCommand(\'copy\')" style="width:100%;max-width:360px;height:48px;font-size:11px;color:#409eff;border:1px solid #ddd;border-radius:4px;padding:4px 6px;resize:none;margin-bottom:16px;word-break:break-all;line-height:1.3;outline:none;cursor:pointer;" title="点击复制">' + payUrl + '</textarea>' : '') +
+            '<div style="display:flex;gap:10px;justify-content:center;margin-top:12px;">' +
+            '<button id="v2-lockfail-download" style="background:#67c23a;color:#fff;border:none;border-radius:6px;' +
+            'padding:8px 20px;font-size:14px;cursor:pointer;">下载二维码</button>' +
+            '<button id="v2-lockfail-close" style="background:#409eff;color:#fff;border:none;border-radius:6px;' +
+            'padding:8px 28px;font-size:14px;cursor:pointer;">关闭</button></div>';
+        document.body.appendChild(popup);
+
+        var overlay = document.createElement('div');
+        overlay.id = 'v2-lockfail-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:2000000029;';
+        document.body.appendChild(overlay);
+
+        var closePopup = function () { popup.remove(); overlay.remove(); };
+        document.getElementById('v2-lockfail-close').onclick = closePopup;
+        overlay.onclick = null;
+
+        var dlBtn = document.getElementById('v2-lockfail-download');
+        if (dlBtn) {
+            dlBtn.onclick = function () {
+                var a = document.createElement('a');
+                a.href = qrDataUrl;
+                a.download = 'pay_qr_' + Date.now() + '.png';
+                a.click();
+            };
+        }
+    }
+
+    async function openPaymentDialog(previewData, product) {
+        // 关闭残留验证码
+        try {
+            var captchaClose = document.querySelector('.tencent-captcha-dy__close-btn') ||
+                document.querySelector('#tcaptcha_transform_dy .close-btn');
+            if (captchaClose) captchaClose.click();
+        } catch (e) {}
+
+        // 构建 pay-middle-page URL 并用 QRCode 库生成二维码
+        var payUrl = buildPayMiddlePageUrl(previewData);
+        if (!payUrl) {
+            log('支付', '构建支付 URL 失败');
+            return false;
+        }
+
+        log('支付', '支付URL: ' + payUrl);
+
+        var QR = (typeof QRCode !== 'undefined') ? QRCode
+            : (typeof win.QRCode !== 'undefined') ? win.QRCode : null;
+        if (!QR) {
+            log('支付', 'QRCode 库未就绪');
+            return false;
+        }
+
+        var amount = previewData.thirdPartyAmount || previewData.payAmount || 0;
+        var productName = previewData.productName || '';
+
+        QR.toDataURL(payUrl, {
+            width: 600, margin: 4, errorCorrectionLevel: 'L'
+        }, function (err, qrDataUrl) {
+            if (err) {
+                log('支付', 'QR生成失败: ' + err.message);
+                return;
+            }
+            showQRPopup(qrDataUrl, amount, productName, '锁单失败，扫码后页面会自动请求锁单', payUrl);
+            log('支付', '支付二维码已弹出');
+        });
+
+        return true;
+    }
+
+    // ==================== 截取官方 canvas 二维码 ====================
+    async function generatePayQRCode(previewData, productInfo) {
+        log('支付', '支付金额: ¥' + previewData.thirdPartyAmount);
+        log('支付', 'bizId: ' + previewData.bizId);
+
+        // 注意：generatePayQRCode 仅作为 QR 库不可用时的截图回退
+        // 轮询等待 canvas 渲染完成（payPreviewFn 已在上层调用）
+        var qrCanvas = null;
+        for (var i = 0; i < 50; i++) {
+            await sleep(200);
+            qrCanvas = document.querySelector('.scan-qrcode-box canvas');
+            if (qrCanvas && qrCanvas.width > 0 && qrCanvas.height > 0) {
+                break;
+            }
+        }
+
+        if (!qrCanvas || qrCanvas.width === 0 || qrCanvas.height === 0) {
+            log('支付', '官方二维码未渲染，请手动查看页面弹窗');
             return;
         }
-    }
-    // ── 自动锁单：preview 成功后直接调 create-sign ──
-    if (autoLockEnabled && lastPreviewResult && lastPreviewResult.code === 200
-        && lastPreviewResult.data && !lastPreviewResult.data.soldOut) {
-        win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('锁单中...');
-        tryLockOrder();
-        timer = setTimeout(autoPay, 100);
-        return;
-    }
-    // API 返回成功，等待二维码渲染（非锁单模式）
-    if (!autoLockEnabled && lastPreviewResult && lastPreviewResult.code === 200
-        && lastPreviewResult.data && !lastPreviewResult.data.soldOut
-        && payRef?.payDialogVisible && payRef?.captchaVerified) {
-        win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('等待二维码渲染...');
-        timer = setTimeout(autoPay, 100);
-        return;
-    }
-    // 繁忙弹窗仍开着（兜底关闭，正常由 handlePreviewResponse 处理）
-    if (payRef?.payDialogVisible && payRef?.isServerBusy) {
-        payRef.payDialogVisible = false;
-        payRef.captchaVerified = false;
-        payRef.isServerBusy = false;
+
+        var dataUrl = qrCanvas.toDataURL('image/png');
+        var amount = previewData.thirdPartyAmount;
+        var productName = productInfo.name || '';
+
+        // 新窗口展示官方二维码
+        try {
+            var newWin = window.open('', '_blank');
+            if (newWin) {
+                newWin.document.write(
+                    '<html><head><title>支付二维码</title></head>' +
+                    '<body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5;">' +
+                    '<div style="text-align:center;">' +
+                    '<h2 style="color:#333;">请使用支付宝扫码支付' + (productName ? ' - ' + productName : '') + '</h2>' +
+                    '<p style="color:#e6a23c;font-size:24px;font-weight:bold;">¥' + amount + '</p>' +
+                    '<img src="' + dataUrl + '" style="width:300px;height:300px;border:1px solid #ddd;" />' +
+                    '<p style="color:#999;font-size:14px;">请尽快扫码支付，二维码有效期有限</p>' +
+                    '</div></body></html>'
+                );
+            }
+        } catch (e) {
+            log('支付', '新窗口打开失败: ' + e.message);
+        }
+
+        // 自动下载二维码图片
+        try {
+            var link = document.createElement('a');
+            link.download = 'qrcode_' + productInfo.name + '_' + Date.now() + '.png';
+            link.href = dataUrl;
+            link.click();
+            log('支付', '二维码图片已自动下载');
+        } catch (e) {}
+
+        log('支付', '官方二维码已截取并展示');
     }
 
-    // 不到时间：倒计时 + 预解题
-    if (!isBuyTimeReached()) {
-        var secs = getSecondsToBuyTime();
-        var m = Math.floor(secs / 60);
-        var s = secs % 60;
-        win.__autoBuyShowCountdown && win.__autoBuyShowCountdown(m + ':' + (s < 10 ? '0' : '') + s);
-        win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('等待' + getBuyTimeStr(), 'idle');
-        // 倒计时 ≤ 30s 开始连接预热
-        if (secs <= 30 && secs > 0) {
-            startConnectionPreheat();
+
+    // ==================== 支付状态轮询 ====================
+    var payPollTimer = null;
+
+    function startPayStatusPolling(bizId) {
+        if (payPollTimer) clearInterval(payPollTimer);
+
+        var pollCount = 0;
+        var maxPolls = 300; // 5分钟
+
+        payPollTimer = setInterval(async function () {
+            pollCount++;
+            if (pollCount > maxPolls) {
+                clearInterval(payPollTimer);
+                log('支付', '轮询超时，请刷新页面查看支付状态');
+                return;
+            }
+
+            try {
+                var resp = await fetchPayStatus(bizId);
+                if (resp.data === 'SUCCESS') {
+                    clearInterval(payPollTimer);
+                    log('支付', '支付成功！');
+                    updatePayStatus('支付成功！');
+                    state.running = false;
+                    updatePanelState('支付成功！', 'success');
+                }
+            } catch (e) {
+                // 静默忽略轮询错误
+            }
+        }, 1000);
+    }
+
+    function updatePayStatus(text) {
+        var el = document.getElementById('v2-pay-status');
+        if (el) el.textContent = text;
+    }
+
+    // ==================== 核心抢购流程 ====================
+    // 架构：到点后流水线 — 解验证码 → 立即发 preview（不等结果）→ 解下一个
+    // preview 是异步 HTTP，解第 N 个验证码时，前面 N-1 个 preview 已经在飞
+
+    // 单次 preview，555 繁忙时复用同一 ticket 即时重发（最多 CONFIG.RETRY_ON_BUSY 次），
+    // 检查 state.running 以便随时中止
+    async function tryPreviewWithRetry(captchaResult, product) {
+        if (!state.running) return null;
+        var params = {
+            productId: product.productId,
+            invitationCode: getQueryString('ic') || CONFIG.INVITATION_CODE,
+            ticket: captchaResult.ticket,
+            randstr: captchaResult.randstr
+        };
+
+        var maxBusyRetry = CONFIG.RETRY_ON_BUSY || 0;
+        for (var attempt = 0; attempt <= maxBusyRetry; attempt++) {
+            if (!state.running) return null;
+
+            var resp;
+            try {
+                resp = await fetchPreview(params);
+            } catch (e) {
+                // HTTP 非 200 → 服务器拒绝（ticket 失效/鉴权失败），继续用同一 ticket 重试无意义，终止
+                if (e.status && e.status !== 200) {
+                    log('接口', 'preview 被服务器拒绝(HTTP ' + e.status + ')，ticket 已失效，停止重试');
+                } else {
+                    log('接口', 'preview 失败: ' + e.message);
+                }
+                return null;
+            }
+            if (!state.running) return null;
+
+            if (resp.code === 200) {
+                if (resp.data && !resp.data.soldOut) return resp.data;
+                log('接口', '已售罄');
+                state.lastSoldOut = true;
+                return null;
+            }
+
+            if (resp.code === 555 && attempt < maxBusyRetry) {
+                log('接口', '繁忙(555)，复用 ticket 重试 ' + (attempt + 1) + '/' + maxBusyRetry);
+                await sleep(CONFIG.RETRY_INTERVAL);
+                continue;
+            }
+
+            log('接口', 'preview: code=' + resp.code + ' ' + (resp.msg || ''));
+            return null;
         }
-        // 预解题：20s 前点击购买按钮弹出验证码
-        if (secs <= 20 && secs > 0 && !captchaPreOpenAttempted && !isCaptchaVisible()) {
-            captchaPreOpenAttempted = true;
+        return null;
+    }
+
+    // 带 UI 记录的 preview（用于预存 token）
+    // 555 繁忙时验证码 ticket 仍有效，直接复用同一 ticket 即时重发（最多 CONFIG.RETRY_ON_BUSY 次），
+    // 避免丢弃宝贵的有效 token 去重新解验证码。
+    async function tryPreviewWithRetryAndRecord(captchaResult, product, tokenObj) {
+        if (!state.running) return null;
+        tokenObj.previewSentTime = Date.now();
+        var params = {
+            productId: product.productId,
+            invitationCode: getQueryString('ic') || CONFIG.INVITATION_CODE,
+            ticket: captchaResult.ticket,
+            randstr: captchaResult.randstr
+        };
+
+        var maxBusyRetry = CONFIG.RETRY_ON_BUSY || 0;
+        for (var attempt = 0; attempt <= maxBusyRetry; attempt++) {
+            if (!state.running) return null;
+
+            var resp;
+            try {
+                resp = await fetchPreview(params);
+            } catch (e) {
+                // HTTP 非 200 / 非 JSON / 网络错误 → 服务器拒绝：ticket 已失效，
+                // 无谓重试没有意义，直接终止。用 HTTP 状态码作为失败标签（如 403/405/500），
+                // 比笼统的 ERR 更能定位问题；raw 保留原始响应体供详情查看。
+                var httpCode = e.status ? ('HTTP ' + e.status) : 'ERR';
+                tokenObj.previewResult = { success: false, code: httpCode, msg: e.message, raw: e.raw || e.body || null };
+                updateTokenDisplay();
+                return null;
+            }
+            if (!state.running) return null;
+
+            if (resp.code === 200) {
+                if (resp.data && !resp.data.soldOut) {
+                    tokenObj.previewResult = { success: true, soldOut: false, code: 200, raw: resp };
+                    updateTokenDisplay();
+                    // 附带 captcha 信息，供触发 Vue 原生支付弹窗使用
+                    resp.data._captchaTicket = captchaResult.ticket;
+                    resp.data._captchaRandstr = captchaResult.randstr;
+                    return resp.data;
+                }
+                tokenObj.previewResult = { success: false, soldOut: true, code: 200, raw: resp };
+                state.lastSoldOut = true; // 记录售罄信号，供「售罄停止抢购」判断
+                updateTokenDisplay();
+                return null;
+            }
+
+            // 555 繁忙：ticket 仍有效，短暂间隔后复用同一 ticket 重发
+            if (resp.code === 555 && attempt < maxBusyRetry) {
+                tokenObj.previewResult = { success: false, code: 555, msg: '繁忙,复用重试' + (attempt + 1) + '/' + maxBusyRetry, raw: resp };
+                updateTokenDisplay();
+                await sleep(CONFIG.RETRY_INTERVAL);
+                continue;
+            }
+
+            tokenObj.previewResult = { success: false, code: resp.code, msg: resp.msg, raw: resp };
+            updateTokenDisplay();
+            return null;
+        }
+        return null;
+    }
+
+    // 并发爆发：对所有预存 token 同时打 preview（不串行 await），
+    // 首个命中立即锁单；一旦锁单成功即中止其余，避免重复锁单。
+    // 返回 { locked:true } | { previewData } | null。
+    function fireConcurrentBurst(tokens, product) {
+        return new Promise(function (resolve) {
+            var settled = false;
+            var pending = tokens.length;
+            var firstPreviewData = null;
+
+            function finish(result) {
+                if (settled) return;
+                settled = true;
+                resolve(result);
+            }
+
+            if (pending === 0) { finish(null); return; }
+
+            tokens.forEach(function (token) {
+                token.previewSent = true;
+                if (!token.source) token.source = '预存';
+                token.previewSentTime = Date.now();
+                updateTokenDisplay();
+
+                tryPreviewWithRetryAndRecord(
+                    { ticket: token.ticket, randstr: token.randstr },
+                    product,
+                    token
+                ).then(function (previewData) {
+                    if (!previewData || settled || state.lockOrderDone) return;
+                    if (!firstPreviewData) firstPreviewData = previewData;
+                    log('抢购', '预存token命中！¥' + previewData.thirdPartyAmount + '，抢先锁单...');
+                    return tryLockOrder(previewData).then(function (lockResult) {
+                        token.lockResult = { success: lockResult.success, raw: lockResult.raw };
+                        updateTokenDisplay();
+                        if (lockResult.success) {
+                            showPaymentQRPopup(lockResult.sign, previewData);
+                            finish({ locked: true });
+                            return;
+                        }
+                        // SKIP 表示已有其它 token 抢先锁单，忽略即可
+                        if (lockResult.code === 'SKIP') return;
+                        // 命中但锁单失败 → 交给上层触发原生支付弹窗
+                        finish({ previewData: previewData });
+                    });
+                }).catch(function (e) {
+                    log('抢购', '并发线路异常: ' + (e && e.message ? e.message : e));
+                }).then(function () {
+                    pending--;
+                    if (pending <= 0 && !settled) {
+                        finish(firstPreviewData ? { previewData: firstPreviewData } : null);
+                    }
+                });
+            });
+        });
+    }
+
+    // 单线程预存 token 抢购：逐个 token 打 preview，避免同一时刻多请求并发触发风控。
+    async function fireSequentialCachedTokens(tokens, product) {
+        for (var i = 0; i < tokens.length && state.running && !state.lockOrderDone; i++) {
+            var token = tokens[i];
+            token.previewSent = true;
+            if (!token.source) token.source = '预存';
+            token.previewSentTime = Date.now();
+            updateTokenDisplay();
+
+            var previewData = await tryPreviewWithRetryAndRecord(
+                { ticket: token.ticket, randstr: token.randstr },
+                product,
+                token
+            );
+            if (!previewData) {
+                if (state.lastSoldOut && isStopOnSoldOut()) break;
+                continue;
+            }
+
+            log('抢购', '预存token命中！¥' + previewData.thirdPartyAmount + '，单线程锁单...');
+            var lockResult = await tryLockOrder(previewData);
+            token.lockResult = { success: lockResult.success, raw: lockResult.raw };
+            updateTokenDisplay();
+            if (lockResult.success) {
+                showPaymentQRPopup(lockResult.sign, previewData);
+                return { locked: true };
+            }
+            if (lockResult.code === 'SKIP') {
+                return state.lockOrderDone ? { locked: true } : null;
+            }
+            return { previewData: previewData };
+        }
+        return null;
+    }
+
+    // 流水线：解验证码 → await preview → 成功立即返回，失败继续下一个
+    async function solveAndFirePipeline(product) {
+        for (var i = 0; i < 3 && state.running; i++) {
+            // 等待 SDK 实例清理，避免验证码实例冲突导致拿到残留 ticket
+            if (i > 0) await sleep(1500);
+
+            try {
+                log('线路' + (i + 1), '弹出验证码...');
+                var captchaResult = await getCaptchaTicket();
+            } catch (e) {
+                log('线路' + (i + 1), '验证码失败: ' + e.message);
+                continue;
+            }
+            if (!state.running) break;
+
+            // 验证码结果基本校验
+            if (!captchaResult || !captchaResult.ticket || captchaResult.ticket.length < 10) {
+                log('线路' + (i + 1), '验证码返回无效 ticket，跳过');
+                continue;
+            }
+
+            // 加入表格跟踪
+            var tokenObj = {
+                ticket: captchaResult.ticket,
+                randstr: captchaResult.randstr,
+                timestamp: Date.now(),
+                previewSent: true,
+                source: '实时'
+            };
+            state.cachedTokens.push(tokenObj);
+            updateTokenDisplay();
+
+            log('线路' + (i + 1), '验证码通过，请求 preview...');
+            var data = await tryPreviewWithRetryAndRecord(captchaResult, product, tokenObj);
+            if (data) return { data: data, tokenObj: tokenObj };
+            if (state.lastSoldOut && isStopOnSoldOut()) {
+                log('线路' + (i + 1), '已售罄，停止后续验证码');
+                return null;
+            }
+
+            // preview 失败后等待 SDK 清理，避免下一个 ticket 是残留的
+            log('线路' + (i + 1), 'preview 失败，等待 SDK 清理...');
+            await sleep(1000);
+        }
+        return null;
+    }
+
+    async function executePurchase() {
+        var packageType = getSelectedPackageType();
+        var tier = getSelectedTier();
+        var product = PRODUCTS[packageType][tier];
+
+        if (!product) {
+            log('错误', '未找到产品: ' + packageType + '/' + tier);
+            return false;
+        }
+
+        log('抢购', '目标: ' + product.name);
+        clickPagePackageTab();
+
+        // Phase 0: 手动 bizId 直通锁单（绕过 preview）
+        var manualBizId = getManualBizId();
+        if (manualBizId) {
+            log('直通', '检测到手动 bizId，跳过 preview，直接锁单');
+            var manualPreviewData = {
+                productId: product.productId,
+                bizId: manualBizId,
+                thirdPartyAmount: product.payAmount || product.price
+            };
+            var manualLockResult = await tryLockOrder(manualPreviewData);
+            var manualTokenObj = {
+                ticket: '(手动bizId)',
+                randstr: '',
+                timestamp: Date.now(),
+                previewSent: true,
+                source: '手动',
+                previewResult: { success: true, code: 200, raw: { data: manualPreviewData } }
+            };
+            if (manualLockResult.success) {
+                manualTokenObj.lockResult = { success: true, raw: manualLockResult };
+                state.cachedTokens.push(manualTokenObj);
+                updateTokenDisplay();
+                log('直通', '锁单成功！bizId=' + manualBizId);
+                showPaymentQRPopup(manualLockResult.sign, manualPreviewData);
+                return true;
+            }
+            manualTokenObj.lockResult = { success: false, raw: manualLockResult.raw };
+            state.cachedTokens.push(manualTokenObj);
+            updateTokenDisplay();
+            log('直通', '锁单失败: ' + (manualLockResult.msg || manualLockResult.code) + '，触发原生弹窗');
+            await openPaymentDialog(manualPreviewData, product);
+            return true;
+        }
+
+        // Phase 1: 用预存 token 到点「并发爆发」——所有有效 token 同时打 preview，
+        // 首个命中(200 && !soldOut)立即锁单并中止其余，最大化命中库存瞬间的概率。
+        // （LIFO reverse 仅用于展示/兜底顺序，实际并发无先后）
+        var cachedTokens = getValidCachedTokens().reverse();
+        if (cachedTokens.length > 0) {
+            var burst;
+            if (isConcurrentBurstEnabled()) {
+                updatePanelState('预存token并发抢购 (' + cachedTokens.length + '个)...', 'running');
+                log('预存', '并发齐发 preview，共 ' + cachedTokens.length + ' 个');
+                burst = await fireConcurrentBurst(cachedTokens, product);
+            } else {
+                updatePanelState('预存token单线程抢购 (' + cachedTokens.length + '个)...', 'running');
+                log('预存', '单线程 preview，共 ' + cachedTokens.length + ' 个');
+                burst = await fireSequentialCachedTokens(cachedTokens, product);
+            }
+            if (burst && burst.locked) {
+                // 已锁单并弹出支付二维码
+                return true;
+            }
+            if (burst && burst.previewData) {
+                // 命中但锁单失败 → 触发页面原生支付弹窗
+                log('抢购', '锁单失败，触发页面原生支付弹窗');
+                await openPaymentDialog(burst.previewData, product);
+                return true;
+            }
+            log('抢购', '预存token全部失败，进入普通抢购');
+        }
+
+        // Phase 1 结束即检查售罄：并发爆发是默认主路径，若已售罄且勾选停止，
+        // 必须在此拦截，否则会穿透进 Phase 2 继续解验证码，导致「售罄停止」形同虚设。
+        if (state.lastSoldOut && isStopOnSoldOut()) {
+            log('抢购', '已售罄，停止抢购（可取消勾选以持续重试）');
+            return false;
+        }
+
+        // Phase 2: 普通抢购
+        while (state.running) {
+            if (!getTencentCaptcha()) {
+                log('抢购', '验证码SDK未就绪');
+                break;
+            }
+
+            var pipelineResult = await solveAndFirePipeline(product);
+            if (pipelineResult) {
+                var data = pipelineResult.data;
+                var tokenObj = pipelineResult.tokenObj;
+                log('抢购', '抢到了！¥' + data.thirdPartyAmount);
+
+                // 先尝试锁单
+                var lockResult = await tryLockOrder(data);
+                if (tokenObj) {
+                    tokenObj.lockResult = { success: lockResult.success, raw: lockResult.raw };
+                    updateTokenDisplay();
+                }
+                if (lockResult.success) {
+                    showPaymentQRPopup(lockResult.sign, data);
+                    return true;
+                }
+                // 锁单失败，直接弹出页面原生支付弹窗
+                log('抢购', '锁单失败，触发页面原生支付弹窗');
+                await openPaymentDialog(data, product);
+                return true;
+            }
+
+            if (!state.running) {
+                log('抢购', '已手动停止');
+                return false;
+            }
+            // 勾选「售罄停止抢购」且本轮检测到售罄 → 跳出，交由 firePurchaseNow 停止回环
+            if (state.lastSoldOut && isStopOnSoldOut()) {
+                log('抢购', '已售罄，停止抢购（可取消勾选以持续重试）');
+                break;
+            }
+            log('抢购', '本轮全部失败，继续...');
+            await sleep(800);
+        }
+        return false;
+    }
+
+    // ==================== 定时调度 ====================
+    function getBuyTimeStr() {
+        var el = document.getElementById('v2-buy-time');
+        return (el && el.value) ? el.value : CONFIG.BUY_TIME_DEFAULT;
+    }
+
+    function parseBuyTime() {
+        var parts = getBuyTimeStr().split(':');
+        return {
+            h: parseInt(parts[0], 10) || 0,
+            m: parseInt(parts[1], 10) || 0,
+            s: parseInt(parts[2], 10) || 0
+        };
+    }
+
+    // 目标抢购时刻的服务器 epoch（ms）
+    function getBuyTargetMs() {
+        var nowMs = getServerTime();
+        var d = new Date(nowMs);
+        var t = parseBuyTime();
+        d.setHours(t.h, t.m, t.s, 0);
+        return d.getTime();
+    }
+
+    // 距离目标时刻的毫秒差（基于服务器时间；<=0 表示已到点）
+    function getMsToBuyTime() {
+        return getBuyTargetMs() - getServerTime();
+    }
+
+    function getSelectedPackageType() {
+        var radio = document.querySelector('input[name="v2-package"]:checked');
+        return radio ? radio.value : CONFIG.PACKAGE_TYPE_DEFAULT;
+    }
+
+    function getSelectedTier() {
+        var radio = document.querySelector('input[name="v2-tier"]:checked');
+        return radio ? radio.value : CONFIG.TIER_DEFAULT;
+    }
+
+    // 是否勾选「售罄停止抢购」：勾选后 preview 返回售罄即停止回环，不再重试
+    function isStopOnSoldOut() {
+        var el = document.getElementById('v2-stop-soldout');
+        return el ? el.checked : true;
+    }
+
+    // 是否启用预存 token 并发爆发：关闭后逐个 token 顺序请求 preview，降低风控风险
+    function isConcurrentBurstEnabled() {
+        var el = document.getElementById('v2-concurrent-burst');
+        return el ? el.checked : true;
+    }
+
+    // 精确卡点相关
+    var exactFireScheduled = false;
+    var EXACT_SCHEDULE_WINDOW = 1500; // 进入该窗口(ms)后切换为单次精确定时
+    var SPIN_MS = 8;                  // 末段忙等自旋时长(ms)，把首发误差压到个位数毫秒
+
+    // 主循环：远端粗粒度轮询做倒计时/预存/预热；临近目标切换为单次精确定时+末段自旋
+    async function mainLoop() {
+        if (!state.running) return;
+
+        var ms = getMsToBuyTime();
+
+        if (ms > 0) {
+            var secs = Math.ceil(ms / 1000);
+            var m = Math.floor(secs / 60);
+            var s = secs % 60;
+            updatePanelState('等待 ' + getBuyTimeStr() + ' (' + m + ':' + (s < 10 ? '0' : '') + s + ')', 'waiting');
+
+            // 自动预存（默认行为）：倒计时 ≤ 30s 时触发（用 precacheRunning 阻止重复）
+            if (secs <= 30 && secs > 1 && !state.precacheRunning) {
+                var validCount = getValidCachedTokens().length;
+                var targetCount = getTargetPrecacheCount();
+                if (validCount < targetCount) {
+                    log('预存', '自动预存启动 (' + validCount + '/' + targetCount + ')');
+                    precacheTokens(targetCount - validCount);
+                }
+            }
+
+            // 连接预热：倒计时 ≤ 30s 开始
+            if (secs <= 30) {
+                startConnectionPreheat();
+            }
+
+            // 临近目标：切换为单次精确定时（不再轮询），到点前几毫秒忙等自旋精确触发
+            if (ms <= EXACT_SCHEDULE_WINDOW) {
+                scheduleExactFire();
+                return;
+            }
+
+            // 远端粗轮询：>31s 每秒一次，否则 250ms 一次（既能及时预存又不空耗）
+            var interval = ms > 31000 ? 1000 : 250;
+            state.timer = setTimeout(mainLoop, interval);
+            return;
+        }
+
+        // ms <= 0：已到点（含失败后的重试回环）
+        await firePurchaseNow();
+    }
+
+    // 单次精确定时：到 目标-SPIN_MS 唤醒，再忙等自旋到精确整点后触发抢购
+    function scheduleExactFire() {
+        if (exactFireScheduled) return;
+        exactFireScheduled = true;
+
+        // 收尾：停止预存/预热，关闭残留验证码弹窗，为纯接口爆发让路
+        state.precacheRunning = false;
+        updatePrecacheBtn(false);
+        stopConnectionPreheat();
+        try {
+            var captchaCloseBtn = document.querySelector('.tencent-captcha-dy__close-btn');
+            if (captchaCloseBtn) captchaCloseBtn.click();
+        } catch (e) {}
+
+        var wakeIn = Math.max(0, getMsToBuyTime() - SPIN_MS);
+        updatePanelState('精确卡点中...', 'waiting');
+        state.timer = setTimeout(function () {
+            // 忙等自旋到精确到点（getServerTime 仅 Date.now()+offset，开销极小）
+            var target = getBuyTargetMs();
+            while (getServerTime() < target) { /* spin */ }
+            exactFireScheduled = false;
+            firePurchaseNow();
+        }, wakeIn);
+    }
+
+    // 到点触发抢购（可被失败重试回环复用）
+    async function firePurchaseNow() {
+        if (!state.running) return;
+
+        state.lastSoldOut = false; // 每轮抢购开始前清零售罄标志，避免上一轮误判
+        updatePanelState('抢购中...', 'running');
+
+        // 检查验证码SDK是否就绪
+        if (!getTencentCaptcha()) {
+            log('等待', '验证码SDK未就绪，3秒后重试...');
+            updatePanelState('等待SDK加载...', 'waiting');
+            state.timer = setTimeout(mainLoop, 3000);
+            return;
+        }
+
+        try {
+            var success = await executePurchase();
+            if (success) {
+                state.running = false;
+                resetStartButton();
+                updatePanelState('抢购成功！', 'success');
+                return;
+            }
+        } catch (e) {
+            log('错误', e.message);
+        }
+
+        // 勾选「售罄停止抢购」且检测到售罄 → 停止回环，不再重试
+        if (state.running && state.lastSoldOut && isStopOnSoldOut()) {
+            state.running = false;
+            resetStartButton();
+            updatePanelState('已售罄，已停止', 'idle');
+            log('抢购', '商品已售罄，已停止抢购');
+            return;
+        }
+
+        if (state.running) {
+            updatePanelState('重试中...', 'running');
+            state.timer = setTimeout(mainLoop, 1000);
+        }
+    }
+
+    // ==================== 检测本地OCR服务 ====================
+    function checkLocalOcrService() {
+        var baseUrl = CONFIG.DDDDOCR_URL.replace(/\/click$/, '/');
+        var onError = function () {
+            log('OCR', '本地服务未启动，请先启动 captcha/ddddocr_server.py');
+        };
+        var onSuccess = function () {
+            log('OCR', '本地识别服务已连接');
+        };
+        if (typeof GM_xmlhttpRequest !== 'undefined') {
+            GM_xmlhttpRequest({
+                method: 'GET', url: baseUrl, timeout: 2000,
+                onload: onSuccess, onerror: onError, ontimeout: onError
+            });
+        } else {
+            var controller = new AbortController();
+            var tid = setTimeout(function () { controller.abort(); }, 2000);
+            fetch(baseUrl, { mode: 'no-cors', signal: controller.signal })
+                .then(function () { clearTimeout(tid); onSuccess(); })
+                .catch(function () { clearTimeout(tid); onError(); });
+        }
+    }
+
+    // ==================== 接口自检 ====================
+    // 复用 init 已有的只读调用，逐项验证鉴权头/端点/字段，把「能不能抓包」变成脚本自报。
+    function probeOcrService() {
+        return new Promise(function (resolve) {
+            var base = CONFIG.DDDDOCR_URL.replace(/\/click$/, '/');
+            if (typeof GM_xmlhttpRequest !== 'undefined') {
+                GM_xmlhttpRequest({
+                    method: 'GET', url: base, timeout: 2000,
+                    onload: function () { resolve(true); },
+                    onerror: function () { resolve(false); },
+                    ontimeout: function () { resolve(false); }
+                });
+            } else {
+                var c = new AbortController();
+                var t = setTimeout(function () { c.abort(); }, 2000);
+                fetch(base, { mode: 'no-cors', signal: c.signal })
+                    .then(function () { clearTimeout(t); resolve(true); })
+                    .catch(function () { clearTimeout(t); resolve(false); });
+            }
+        });
+    }
+
+    async function runSelfCheck() {
+        var lines = [];
+        // ok: true=通过 / false=异常 / null=中性提示
+        function add(ok, label, detail) {
+            var mark = ok === true ? '[OK] ' : ok === false ? '[X]  ' : '[-]  ';
+            lines.push(mark + label + (detail ? '：' + detail : ''));
+        }
+
+        log('自检', '开始接口自检...');
+
+        // ---- 环境 ----
+        lines.push('=== 环境 ===');
+        var token = getCookie(AUTH_COOKIE_KEY);
+        add(!!token, 'Cookie ' + AUTH_COOKIE_KEY, token ? '已获取(' + token.length + ' 字符)' : '缺失！未登录或键名已变');
+        var org = localStorage.getItem(ORG_LS_KEY);
+        var proj = localStorage.getItem(PROJECT_LS_KEY);
+        add(!!org, 'localStorage ' + ORG_LS_KEY, org || '缺失（组织头将为空）');
+        add(!!proj, 'localStorage ' + PROJECT_LS_KEY, proj || '缺失（项目头将为空）');
+        add(!!getTencentCaptcha(), '腾讯验证码 SDK', getTencentCaptcha() ? '已加载' : '未加载（抢购/预存需要）');
+        var hasQR = (typeof QRCode !== 'undefined') || (typeof win.QRCode !== 'undefined');
+        add(hasQR, 'QRCode 库', hasQR ? '已加载' : '未加载（锁单后二维码需要）');
+        add(!!findCryptoJS(), 'CryptoJS 库', findCryptoJS() ? '已加载' : '未加载（仅锁单失败兜底需要）');
+        var ocrOk = await probeOcrService();
+        add(ocrOk, '本地 OCR 服务 ' + CONFIG.DDDDOCR_URL, ocrOk ? '可连接' : '未启动/不可达');
+
+        // ---- 接口（使用当前鉴权头）----
+        lines.push('');
+        lines.push('=== 接口（使用当前鉴权头）===');
+        try {
+            var ci = await fetchCustomerInfo();
+            var okci = !!(ci && ci.code === 200 && ci.data && ci.data.customerNumber);
+            add(okci, 'GET /biz/customer/getCustomerInfo',
+                'code=' + (ci && ci.code) + (okci ? ' 用户=' + ci.data.customerName + '(' + ci.data.customerNumber + ')' : ' ' + ((ci && ci.msg) || '鉴权可能失效')));
+        } catch (e) {
+            add(false, 'GET /biz/customer/getCustomerInfo', e.message);
+        }
+        try {
+            var bp = await fetchBatchPreview({ invitationCode: getQueryString('ic') || CONFIG.INVITATION_CODE });
+            var okbp = !!(bp && bp.code === 200 && bp.data && bp.data.productList);
+            add(okbp, 'POST /biz/pay/batch-preview',
+                'code=' + (bp && bp.code) + (okbp ? ' 产品数=' + bp.data.productList.length : ' ' + ((bp && bp.msg) || '')));
+        } catch (e) {
+            add(false, 'POST /biz/pay/batch-preview', e.message);
+        }
+
+        // ---- preview / create-sign 字段 ----
+        lines.push('');
+        lines.push('=== preview / create-sign 字段 ===');
+        var product = PRODUCTS[getSelectedPackageType()][getSelectedTier()];
+        var validTokens = getValidCachedTokens();
+        var ic = getQueryString('ic') || CONFIG.INVITATION_CODE;
+
+        if (validTokens.length > 0) {
+            // 有真实 token：打一次真实 preview（会消耗该 token）
+            var tk = validTokens[validTokens.length - 1];
+            tk.previewSent = true;
+            if (!tk.source) tk.source = '自检';
+            updateTokenDisplay();
+            try {
+                var pv = await fetchPreview({ productId: product.productId, invitationCode: ic, ticket: tk.ticket, randstr: tk.randstr });
+                if (pv.code === 200 && pv.data && !pv.data.soldOut) {
+                    add(true, 'POST /biz/pay/preview (真实token)', 'code=200 有货！bizId=' + pv.data.bizId + ' —— 字段正确，create-sign 可正常构造');
+                } else if (pv.code === 200 && pv.data && pv.data.soldOut) {
+                    add(true, 'POST /biz/pay/preview (真实token)', 'code=200 售罄 —— 字段被接受，payload 结构正确');
+                } else if (pv.code === 555) {
+                    add(true, 'POST /biz/pay/preview (真实token)', 'code=555 繁忙 —— 字段被接受，payload 结构正确');
+                } else {
+                    add(false, 'POST /biz/pay/preview (真实token)', 'code=' + pv.code + ' ' + (pv.msg || '') + ' —— 可能字段变更，请核对');
+                }
+            } catch (e) {
+                add(false, 'POST /biz/pay/preview (真实token)', e.message + ' —— 端点可能变更/404');
+            }
+        } else {
+            // 无 token：仅探测端点可达性（无有效 ticket，不会真正下单）
+            try {
+                var probe = await fetchPreview({ productId: product.productId, invitationCode: ic, ticket: 'selfcheck-probe', randstr: 'selfcheck' });
+                add(null, 'POST /biz/pay/preview (无token探测)',
+                    'code=' + probe.code + ' ' + (probe.msg || '') + ' —— 端点可达；要验证字段请先预存 1 个 token 再自检');
+            } catch (e) {
+                // 假 ticket 被服务器以 HTTP 4xx 拒绝属预期：收到任何 HTTP 状态码即证明端点可达。
+                // 仅当无状态码（status=0 网络错误）或非 JSON 响应时，才判定端点异常。
+                if (e.status && e.status !== 0) {
+                    add(null, 'POST /biz/pay/preview (无token探测)',
+                        'HTTP ' + e.status + ' —— 端点可达（假 ticket 被拒属预期）；要验证字段请先预存 1 个 token 再自检');
+                } else {
+                    add(false, 'POST /biz/pay/preview (无token探测)', e.message + ' —— 端点可能变更/404');
+                }
+            }
+            lines.push('     注：create-sign 需 preview 命中(有货)才能验证，售罄期无法自动验证；其字段与页面锁单逻辑一致。');
+        }
+
+        // ---- 结论 ----
+        lines.push('');
+        lines.push('=== 结论 ===');
+        var failed = lines.filter(function (l) { return l.indexOf('[X]') === 0; });
+        if (failed.length === 0) {
+            lines.push('关键项均通过。若 getCustomerInfo / batch-preview 为 [OK]，说明鉴权头与端点正确，');
+            lines.push('preview / create-sign 用的是同一套鉴权头，可放心使用。');
+        } else {
+            lines.push('存在 ' + failed.length + ' 项异常，请按上面标记为 [X] 的项排查（多为未登录、cookie/键名变更或本地OCR未启动）。');
+        }
+
+        showSelfCheckReport(lines.join('\n'));
+        log('自检', '完成，异常 ' + failed.length + ' 项');
+    }
+
+    function showSelfCheckReport(text) {
+        var overlay = document.getElementById('v2-detail-overlay');
+        var title = document.getElementById('v2-detail-title');
+        var body = document.getElementById('v2-detail-body');
+        var footer = document.getElementById('v2-detail-footer');
+        if (overlay && title && body) {
+            title.textContent = '接口自检报告';
+            body.textContent = text;
+            if (footer) footer.innerHTML = '';
+            overlay.style.display = 'flex';
+        } else {
+            alert(text);
+        }
+    }
+
+    // ==================== 控制面板UI ====================
+    function createControlPanel() {
+        var panel = document.createElement('div');
+        panel.id = 'v2-control-panel';
+
+        var savedTime = loadSetting('v2_buy_time', CONFIG.BUY_TIME_DEFAULT);
+        var savedPkg = loadSetting('v2_package', CONFIG.PACKAGE_TYPE_DEFAULT);
+        var savedTier = loadSetting('v2_tier', CONFIG.TIER_DEFAULT);
+        // 兜底串行路径仍用 PRECACHE_INTERVAL 控制 preview 间隔（到点主路径为并发爆发，不受其影响）
+        var savedInterval = loadSetting('v2_precache_interval', String(CONFIG.PRECACHE_INTERVAL));
+        var savedStopSoldOut = loadSetting('v2_stop_soldout', 'true'); // 默认勾选：售罄即停止
+        var savedConcurrentBurst = loadSetting('v2_concurrent_burst', 'true'); // 默认勾选：预存 token 并发爆发
+
+        // 恢复 CONFIG
+        CONFIG.PRECACHE_INTERVAL = parseInt(savedInterval, 10) || 1800;
+
+        panel.innerHTML =
+            '<div class="v2-panel-row">' +
+            '<div class="v2-status-dot" id="v2-status-dot"></div>' +
+            '<span id="v2-status-text">就绪</span>' +
+            '<span id="v2-time-offset" style="color:#67c23a;font-size:10px;margin-left:auto;"></span>' +
+            '<button id="v2-selfcheck-btn" class="v2-btn-mini" style="margin-left:4px;">自检</button>' +
+            '<button id="v2-help-btn" class="v2-btn-mini" style="margin-left:4px;">说明</button>' +
+            '</div>' +
+            '<div class="v2-panel-row">' +
+            '<span class="v2-label">套餐</span>' +
+            '<div class="v2-radio-group">' +
+            '<input type="radio" name="v2-package" id="v2-pkg-month" value="month"' + (savedPkg === 'month' ? ' checked' : '') + '><label for="v2-pkg-month">月</label>' +
+            '<input type="radio" name="v2-package" id="v2-pkg-quarter" value="quarter"' + (savedPkg === 'quarter' ? ' checked' : '') + '><label for="v2-pkg-quarter">季</label>' +
+            '<input type="radio" name="v2-package" id="v2-pkg-year" value="year"' + (savedPkg === 'year' ? ' checked' : '') + '><label for="v2-pkg-year">年</label>' +
+            '</div>' +
+            '</div>' +
+            '<div class="v2-panel-row">' +
+            '<span class="v2-label">档位</span>' +
+            '<div class="v2-radio-group">' +
+            '<input type="radio" name="v2-tier" id="v2-tier-lite" value="lite"' + (savedTier === 'lite' ? ' checked' : '') + '><label for="v2-tier-lite">Lite</label>' +
+            '<input type="radio" name="v2-tier" id="v2-tier-pro" value="pro"' + (savedTier === 'pro' ? ' checked' : '') + '><label for="v2-tier-pro">Pro</label>' +
+            '<input type="radio" name="v2-tier" id="v2-tier-max" value="max"' + (savedTier === 'max' ? ' checked' : '') + '><label for="v2-tier-max">Max</label>' +
+            '</div>' +
+            '</div>' +
+            '<div class="v2-panel-row">' +
+            '<span class="v2-label">时间</span>' +
+            '<input type="time" id="v2-buy-time" step="1" value="' + savedTime + '">' +
+            '</div>' +
+            '<div class="v2-panel-row">' +
+            '<span class="v2-label">产品</span>' +
+            '<span id="v2-product-info" class="v2-product-info"></span>' +
+            '<button id="v2-refresh-btn" class="v2-btn-mini">刷新</button>' +
+            '</div>' +
+            '<div class="v2-separator"></div>' +
+            '<div class="v2-panel-row"' + (CONFIG.ENABLE_MANUAL_BIZID ? '' : ' style="display:none;"') + '>' +
+            '<span class="v2-label">bizId</span>' +
+            '<input type="text" id="v2-manual-bizid" class="v2-bizid-input" placeholder="留空走正常流程">' +
+            '<span class="v2-hint">直通锁单</span>' +
+            '</div>' +
+            '<div class="v2-panel-row">' +
+            '<span class="v2-label" style="width:auto;">抢购记录</span>' +
+            '<span class="v2-hint" style="margin-left:auto;">到点前自动预存 token</span>' +
+            '</div>' +
+            '<table class="v2-token-table" id="v2-token-table">' +
+            '<thead><tr><th>#</th><th>ticket</th><th>时间</th><th>preview</th><th>锁单</th></tr></thead>' +
+            '<tbody id="v2-token-tbody"><tr><td colspan="5" class="v2-token-empty">暂无预存</td></tr></tbody>' +
+            '</table>' +
+            '<div class="v2-separator"></div>' +
+            '<div class="v2-panel-row v2-btn-row">' +
+            '<button id="v2-start-btn" class="v2-btn v2-btn-primary">开始抢购</button>' +
+            '<label class="v2-checkbox-label v2-stop-soldout-inline">' +
+            '<input type="checkbox" id="v2-stop-soldout"' + (savedStopSoldOut !== 'false' ? ' checked' : '') + ' />' +
+            '售罄停止抢购' +
+            '</label>' +
+            '<label class="v2-checkbox-label v2-concurrent-burst-inline">' +
+            '<input type="checkbox" id="v2-concurrent-burst"' + (savedConcurrentBurst !== 'false' ? ' checked' : '') + ' />' +
+            '并发抢购' +
+            '</label>' +
+            '<button id="v2-test-btn" class="v2-btn v2-btn-secondary" style="display:none;">测试验证码</button>' +
+            '</div>' +
+            '<div style="text-align:right;font-size:10px;color:#999;padding:2px 4px 0 0;">v2.3.1</div>' +
+            '<div class="v2-detail-overlay" id="v2-detail-overlay" style="display:none;">' +
+            '<div class="v2-detail-box">' +
+            '<div class="v2-detail-header"><span id="v2-detail-title">详情</span><button id="v2-detail-close">&times;</button></div>' +
+            '<pre class="v2-detail-body" id="v2-detail-body"></pre>' +
+            '<div id="v2-detail-footer" style="padding:0 16px 12px;text-align:center;transform: translateY(-20px);"></div>' +
+            '</div>' +
+            '</div>' +
+            '<div class="v2-help-overlay" id="v2-main-help-overlay" style="display:none;">' +
+            '<div class="v2-help-box" style="max-width:460px;">' +
+            '<h3>使用说明 <span style="font-size:11px;color:#888;font-weight:normal;">v2.3.1</span></h3>' +
+            '<div class="v2-help-item"><span class="v2-help-num">1.</span>请<span class="v2-help-highlight">提前进入抢号界面</span>，高峰期页面可能无法加载。进入后<span class="v2-help-highlight">不要刷新</span>。选择套餐和档位，设置抢购时间，点击"开始抢购"即可到点自动抢购。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">2.</span>可将倒计时设置为当日更早的时间进行<span class="v2-help-highlight">测试</span>，验证脚本是否正常工作。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">3.</span>验证码识别使用本地 ddddocr 服务（<span class="v2-help-highlight">需提前启动 captcha/ddddocr_server.py</span>），识别速度约 100ms。若未启动本地服务，脚本启动时会弹出警告提示。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">4.</span>脚本原理是自动激活购买按钮并通过接口直接调用，不使用暴力手段。能否抢到仍需运气，祝您好运！</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">5.</span><span class="v2-help-highlight">锁单机制</span>：preview 成功后自动调 create-sign 接口锁单，锁住订单后弹出支付二维码。若锁单失败，会自动弹出页面原生支付弹窗供您扫码。若锁单成功但二维码未弹出，可在接口记录详情中点击「重新弹出支付二维码」，或复制 sign 链接到 <a href="https://freetoolkit.cn/tools/%E4%BA%8C%E7%BB%B4%E7%A0%81%E7%94%9F%E6%88%90" target="_blank" style="color:#409eff;">在线二维码生成工具</a> 手动生成。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">6.</span><span class="v2-help-highlight">预存（自动）</span>：开始抢购后，脚本会在倒计时 ≤ 30s 时自动提前解验证码并缓存 ticket。默认勾选「并发抢购」时，到点用多个缓存 token 同时请求 preview；取消勾选后改为逐个 token 单线程请求，降低风控风险。命中后立即锁单，「抢购记录」表格中可看到每个 token 的 preview 与锁单结果。</div>' +
+            '<div class="v2-help-item"><span class="v2-help-num">7.</span><span class="v2-help-highlight">自检</span>：点右上角「自检」按钮，脚本会用当前登录态逐项检测 cookie/组织项目头、getCustomerInfo、batch-preview 是否正常，以及（有预存 token 时）真实打一次 preview 验证接口字段——无需手动抓包即可确认脚本能否正常工作。</div>' +
+            '<div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(0,0,0,0.08);text-align:center;">' +
+            '</div>' +
+            '<button class="v2-help-close" id="v2-main-help-close">我知道了</button>' +
+            '</div>' +
+            '</div>';
+
+        document.body.appendChild(panel);
+
+        // 绑定事件
+        document.getElementById('v2-start-btn').addEventListener('click', function () {
+            state.running = !state.running;
+            exactFireScheduled = false;
+            if (state.running) {
+                this.textContent = '停止';
+                this.className = 'v2-btn v2-btn-danger';
+                mainLoop();
+            } else {
+                this.textContent = '开始抢购';
+                this.className = 'v2-btn v2-btn-primary';
+                clearTimeout(state.timer);
+                updatePanelState('已停止', 'idle');
+            }
+        });
+
+        // 售罄停止抢购 toggle（持久化）
+        document.getElementById('v2-stop-soldout').addEventListener('change', function () {
+            saveSetting('v2_stop_soldout', String(this.checked));
+        });
+
+        // 并发抢购 toggle（持久化）
+        document.getElementById('v2-concurrent-burst').addEventListener('change', function () {
+            saveSetting('v2_concurrent_burst', String(this.checked));
+        });
+
+        // 详情弹窗关闭
+        document.getElementById('v2-detail-close').addEventListener('click', function () {
+            document.getElementById('v2-detail-overlay').style.display = 'none';
+        });
+        document.getElementById('v2-detail-overlay').addEventListener('click', function (e) {
+            if (e.target === this) this.style.display = 'none';
+        });
+
+        // 接口自检
+        document.getElementById('v2-selfcheck-btn').addEventListener('click', async function () {
+            var btn = this;
+            var old = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '检测中...';
+            try {
+                await runSelfCheck();
+            } catch (e) {
+                log('自检', '异常: ' + (e && e.message ? e.message : e));
+            } finally {
+                btn.disabled = false;
+                btn.textContent = old;
+            }
+        });
+
+        // 主说明弹窗
+        document.getElementById('v2-help-btn').addEventListener('click', function () {
+            document.getElementById('v2-main-help-overlay').style.display = 'flex';
+        });
+        document.getElementById('v2-main-help-close').addEventListener('click', function () {
+            document.getElementById('v2-main-help-overlay').style.display = 'none';
+        });
+        document.getElementById('v2-main-help-overlay').addEventListener('click', function (e) {
+            if (e.target === this) this.style.display = 'none';
+        });
+
+        // 刷新产品数据
+        document.getElementById('v2-refresh-btn').addEventListener('click', function () {
+            var btn = this;
+            btn.disabled = true;
+            btn.textContent = '...';
+            fetchBatchPreview({
+                invitationCode: getQueryString('ic') || CONFIG.INVITATION_CODE
+            }).then(function (resp) {
+                if (resp.code === 200 && resp.data && resp.data.productList) {
+                    updateProductsFromBatchPreview(resp.data.productList);
+                    updateProductInfo();
+                } else if (resp.code === 555) {
+                    var infoEl = document.getElementById('v2-product-info');
+                    if (infoEl) {
+                        infoEl.textContent = '繁忙';
+                        infoEl.style.color = '#e6a23c';
+                    }
+                } else {
+                    log('产品', '刷新失败: ' + (resp.msg || resp.code));
+                }
+            }).catch(function (e) {
+                log('产品', '刷新失败: ' + e.message);
+            }).finally(function () {
+                btn.disabled = false;
+                btn.textContent = '刷新';
+            });
+        });
+
+        document.getElementById('v2-test-btn').addEventListener('click', async function () {
+            this.disabled = true;
+            this.textContent = '识别中...';
+            try {
+                log('测试', '弹出验证码...');
+                var result = await getCaptchaTicket();
+                log('测试', '验证码通过！ticket: ' + result.ticket.substring(0, 30) + '...');
+            } catch (e) {
+                log('测试', '失败: ' + e.message);
+            } finally {
+                this.disabled = false;
+                this.textContent = '测试验证码';
+            }
+        });
+
+        // 保存设置
+        document.getElementById('v2-buy-time').addEventListener('change', function () {
+            saveSetting('v2_buy_time', this.value);
+        });
+        document.querySelectorAll('input[name="v2-package"]').forEach(function (r) {
+            r.addEventListener('change', function () {
+                saveSetting('v2_package', this.value);
+                updateProductInfo();
+                clickPagePackageTab();
+                highlightPackageTab();
+                // 切换套餐后等待页面卡片更新再高亮
+                setTimeout(highlightPackageCard, 500);
+            });
+        });
+        document.querySelectorAll('input[name="v2-tier"]').forEach(function (r) {
+            r.addEventListener('change', function () {
+                saveSetting('v2_tier', this.value);
+                updateProductInfo();
+                highlightPackageCard();
+            });
+        });
+
+        // 拖拽
+        makeDraggable(panel);
+
+        // 恢复位置（clamp 防止负值导致面板不可见）
+        var savedPos = loadSetting('v2_panel_pos', null);
+        if (savedPos) {
+            try {
+                var pos = JSON.parse(savedPos);
+                var clamped = clampPanelPos(pos.left, pos.top, 280, 100);
+                panel.style.left = clamped.left + 'px';
+                panel.style.top = clamped.top + 'px';
+                panel.style.right = 'auto';
+            } catch (e) {}
+        }
+
+        updateProductInfo();
+    }
+
+    function updateProductInfo() {
+        var pkg = getSelectedPackageType();
+        var tier = getSelectedTier();
+        var product = PRODUCTS[pkg][tier];
+        var el = document.getElementById('v2-product-info');
+        if (el && product) {
+            var priceText = product.payAmount ? '¥' + product.payAmount : '¥' + product.price;
+            var stockText = product.soldOut ? ' [售罄]' : ' [有货]';
+            el.textContent = product.productId + ' ' + priceText + stockText;
+            el.style.color = product.soldOut ? '#f56c6c' : '#67c23a';
+        }
+    }
+
+    function updatePanelState(text, statusClass) {
+        var dot = document.getElementById('v2-status-dot');
+        var textEl = document.getElementById('v2-status-text');
+        if (textEl) textEl.textContent = text;
+        if (dot) {
+            dot.className = 'v2-status-dot';
+            if (statusClass) dot.classList.add('v2-' + statusClass);
+        }
+    }
+
+    function resetStartButton() {
+        var btn = document.getElementById('v2-start-btn');
+        if (btn) {
+            btn.textContent = '开始抢购';
+            btn.className = 'v2-btn v2-btn-primary';
+        }
+    }
+
+    function clampPanelPos(left, top, elWidth, elHeight) {
+        var vw = window.innerWidth;
+        var vh = window.innerHeight;
+        var minVisible = 40;
+        var w = elWidth || 280;
+        var h = elHeight || 100;
+        // 左侧至少 minVisible 可见：left >= -(w - minVisible)
+        // 右侧至少 minVisible 可见：left <= vw - minVisible
+        var clampedLeft = Math.max(-(w - minVisible), Math.min(left, vw - minVisible));
+        var clampedTop = Math.max(-(h - minVisible), Math.min(top, vh - minVisible));
+        return { left: clampedLeft, top: clampedTop };
+    }
+
+    function makeDraggable(el) {
+        var isDragging = false;
+        var startX, startY, elStartX, elStartY;
+
+        el.addEventListener('mousedown', function (e) {
+            if (['BUTTON', 'INPUT', 'LABEL', 'TEXTAREA'].indexOf(e.target.tagName) >= 0) return;
+            // 详情弹窗内允许文本选择，不触发拖拽
+            if (e.target.closest && e.target.closest('.v2-detail-overlay')) return;
+            isDragging = true;
+            el.classList.add('v2-dragging');
+            startX = e.clientX;
+            startY = e.clientY;
+            var rect = el.getBoundingClientRect();
+            elStartX = rect.left;
+            elStartY = rect.top;
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', function (e) {
+            if (!isDragging) return;
+            el.style.left = (elStartX + e.clientX - startX) + 'px';
+            el.style.top = (elStartY + e.clientY - startY) + 'px';
+            el.style.right = 'auto';
+        });
+
+        document.addEventListener('mouseup', function () {
+            if (isDragging) {
+                isDragging = false;
+                el.classList.remove('v2-dragging');
+                var rect = el.getBoundingClientRect();
+                var clamped = clampPanelPos(rect.left, rect.top, rect.width, rect.height);
+                el.style.left = clamped.left + 'px';
+                el.style.top = clamped.top + 'px';
+                saveSetting('v2_panel_pos', JSON.stringify(clamped));
+            }
+        });
+    }
+
+    // ==================== 样式 ====================
+    function injectStyles() {
+        var css = '' +
+            '#v2-control-panel {' +
+            '  position: fixed; top: 50px; right: 10px; z-index: 2000000022;' +
+            '  background: rgba(0,0,0,0.88); color: #fff;' +
+            '  padding: 10px 14px; border-radius: 8px;' +
+            '  font: 13px/1.6 "SF Mono", Consolas, monospace;' +
+            '  user-select: none; cursor: move;' +
+            '  box-shadow: 0 2px 8px rgba(0,0,0,0.3);' +
+            '  min-width: 280px; max-width: 380px;' +
+            '}' +
+            '#v2-control-panel.v2-dragging { opacity: 0.8; }' +
+            '.v2-panel-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }' +
+            '.v2-label { color: #ccc; font-size: 12px; width: 32px; flex-shrink: 0; }' +
+            '.v2-radio-group { display: flex; gap: 2px; }' +
+            '.v2-radio-group input { display: none; }' +
+            '.v2-radio-group label {' +
+            '  padding: 2px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;' +
+            '  background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);' +
+            '  transition: all 0.15s;' +
+            '}' +
+            '.v2-radio-group input:checked + label {' +
+            '  background: #409eff; border-color: #409eff; color: #fff;' +
+            '}' +
+            'input[name="v2-package"]:checked + label { background: #e6a23c; border-color: #e6a23c; }' +
+            '#v2-buy-time {' +
+            '  width: 90px; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
+            '  padding: 2px 6px; font: 12px monospace;' +
+            '}' +
+            '.v2-status-dot {' +
+            '  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;' +
+            '  background: #909399;' +
+            '}' +
+            '.v2-status-dot.v2-running { background: #67c23a; animation: v2-pulse 1s infinite; }' +
+            '.v2-status-dot.v2-waiting { background: #e6a23c; }' +
+            '.v2-status-dot.v2-success { background: #67c23a; }' +
+            '.v2-status-dot.v2-idle { background: #909399; }' +
+            '@keyframes v2-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }' +
+            '.v2-btn-row { margin-top: 8px; }' +
+            '.v2-btn {' +
+            '  cursor: pointer; color: #fff; border: none; border-radius: 4px;' +
+            '  padding: 5px 14px; font: 12px monospace;' +
+            '}' +
+            '.v2-btn-primary { background: #409eff; }' +
+            '.v2-btn-primary:hover { background: #66b1ff; }' +
+            '.v2-btn-danger { background: #f56c6c; }' +
+            '.v2-btn-danger:hover { background: #f78989; }' +
+            '.v2-btn-secondary { background: #67c23a; }' +
+            '.v2-btn-secondary:hover { background: #85ce61; }' +
+            '.v2-btn:disabled { background: #909399; cursor: not-allowed; }' +
+            '.v2-btn-mini {' +
+            '  cursor: pointer; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
+            '  padding: 2px 10px; font-size: 12px; margin-left: 4px;' +
+            '}' +
+            '.v2-btn-mini:hover { background: rgba(255,255,255,0.25); }' +
+            '.v2-btn-mini:disabled { opacity: 0.5; cursor: not-allowed; }' +
+            '.v2-hint { color: #999; font-size: 11px; }' +
+            '.v2-help-btn {' +
+            '  display: inline-flex; align-items: center; justify-content: center;' +
+            '  width: 14px; height: 14px; border-radius: 50%;' +
+            '  background: rgba(255,255,255,0.2); color: #fff; font-size: 10px;' +
+            '  border: 1px solid rgba(255,255,255,0.3); cursor: pointer;' +
+            '  margin-left: 4px; padding: 0; line-height: 1; vertical-align: middle;' +
+            '}' +
+            '.v2-help-btn:hover { background: #409eff; border-color: #409eff; }' +
+            '.v2-help-overlay {' +
+            '  position: fixed; top: 0; left: 0; right: 0; bottom: 0;' +
+            '  z-index: 2000000024; display: flex; align-items: center; justify-content: center;' +
+            '  background: rgba(0,0,0,0.5);' +
+            '}' +
+            '.v2-help-box {' +
+            '  background: #fff; color: #333; border-radius: 12px;' +
+            '  max-width: 480px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 24px 32px;' +
+            '  box-shadow: 0 4px 20px rgba(0,0,0,0.3);' +
+            '}' +
+            '.v2-help-box h3 { margin: 0 0 16px 0; font-size: 18px; color: #409eff; border-bottom: 1px solid #eee; padding-bottom: 12px; }' +
+            '.v2-help-box p { margin: 6px 0; font-size: 13px; line-height: 1.8; color: #333; }' +
+            '.v2-help-box .v2-help-highlight { color: #e6a23c; font-weight: bold; }' +
+            '.v2-help-box .v2-help-step { color: #67c23a; font-weight: bold; }' +
+            '.v2-help-close {' +
+            '  margin-top: 20px; cursor: pointer; background: #409eff; color: #fff;' +
+            '  border: none; border-radius: 6px; padding: 8px 32px; font-size: 14px;' +
+            '}' +
+            '.v2-help-close:hover { background: #66b1ff; }' +
+            '.v2-help-item {' +
+            '  margin-bottom: 16px; padding-left: 24px; position: relative;' +
+            '  font-size: 14px; line-height: 1.8; color: #333;' +
+            '}' +
+            '.v2-help-num {' +
+            '  position: absolute; left: 0; color: #409eff; font-weight: bold;' +
+            '}' +
+            '.v2-bizid-input {' +
+            '  flex: 1; min-width: 0; background: rgba(255,255,255,0.15); color: #fff;' +
+            '  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;' +
+            '  padding: 2px 6px; font: 11px monospace;' +
+            '}' +
+            '.v2-bizid-input::placeholder { color: rgba(255,255,255,0.4); }' +
+            '.v2-product-info { color: #67c23a; font-size: 11px; }' +
+            '.v2-separator { border-top: 1px solid rgba(255,255,255,0.15); margin: 6px 0; }' +
+            '.v2-token-table {' +
+            '  width: 100%; border-collapse: collapse; margin: 4px 0;' +
+            '  font-size: 10px; color: #ccc;' +
+            '  display: block;' +
+            '}' +
+            '.v2-token-table thead { display: table; width: 100%; table-layout: fixed; }' +
+            '.v2-token-table tbody {' +
+            '  display: block; height: 110px; overflow-y: auto; width: 100%;' +
+            '}' +
+            '.v2-token-table thead tr, .v2-token-table tbody tr { display: table; width: 100%; table-layout: fixed; }' +
+            '.v2-token-table tbody::-webkit-scrollbar { width: 3px; }' +
+            '.v2-token-table tbody::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }' +
+            '.v2-token-table th {' +
+            '  text-align: left; padding: 2px 4px; color: #999; font-weight: normal;' +
+            '  border-bottom: 1px solid rgba(255,255,255,0.15);' +
+            '}' +
+            '.v2-token-table td { padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }' +
+            /* 序号列固定宽度，容纳 3 位数序号 +「实时」标签，避免大数字挤压/截断其它列（thead/tbody 均需设） */
+            '.v2-token-table th:first-child, .v2-token-table td:first-child { width: 46px; text-overflow: clip; }' +
+            '.v2-token-table tr:hover { background: rgba(255,255,255,0.08); }' +
+            '.v2-token-expired td { color: #666; text-decoration: line-through; }' +
+            '.v2-token-empty { color: #666; font-style: italic; text-align: center; }' +
+            '.v2-tag {' +
+            '  display: inline-block; padding: 0 4px; border-radius: 2px; font-size: 9px;' +
+            '}' +
+            '.v2-tag-ok { background: rgba(103,194,58,0.2); color: #67c23a; }' +
+            '.v2-tag-warn { background: rgba(230,162,60,0.2); color: #e6a23c; }' +
+            '.v2-tag-err { background: rgba(245,108,108,0.2); color: #f56c6c; }' +
+            '.v2-tag-sending { background: rgba(64,158,255,0.2); color: #409eff; }' +
+            '.v2-checkbox-label {' +
+            '  display: flex; align-items: center; gap: 4px; cursor: pointer;' +
+            '  font-size: 12px; color: #ccc;' +
+            '}' +
+            '.v2-checkbox-label input { margin: 0; }' +
+            '.v2-detail-overlay {' +
+            '  position: fixed; top: 0; left: 0; right: 0; bottom: 0;' +
+            '  z-index: 2000000023; display: flex; align-items: center; justify-content: center;' +
+            '  background: rgba(0,0,0,0.5);' +
+            '}' +
+            '.v2-detail-box {' +
+            '  background: #fff; color: #333; border-radius: 12px;' +
+            '  max-width: 500px; width: 90%; max-height: 60vh; overflow: hidden;' +
+            '  box-shadow: 0 4px 20px rgba(0,0,0,0.3);' +
+            '  user-select: text; -webkit-user-select: text;' +
+            '}' +
+            '.v2-detail-header {' +
+            '  display: flex; justify-content: space-between; align-items: center;' +
+            '  padding: 12px 16px; border-bottom: 1px solid #eee;' +
+            '  font-size: 14px; font-weight: bold; color: #333;' +
+            '}' +
+            '.v2-detail-header button {' +
+            '  background: none; border: none; color: #999; font-size: 18px; cursor: pointer;' +
+            '}' +
+            '.v2-detail-body {' +
+            '  padding: 16px; overflow-y: auto; max-height: 50vh; margin: 0;' +
+            '  font-size: 12px; white-space: pre-wrap; word-break: break-all;' +
+            '  color: #333; background: none;' +
+            '}' +
+            /* 套餐卡片高亮 */
+            '.package-card-box.auto-buy-selected {' +
+            '  border: 3px solid #e6a23c !important;' +
+            '  box-shadow: 0 0 12px rgba(230, 162, 60, 0.5) !important;' +
+            '}' +
+            '.switch-tab-item.auto-buy-pkg-selected {' +
+            '  border: 2px solid #e6a23c !important;' +
+            '  box-shadow: 0 0 8px rgba(230, 162, 60, 0.5) !important;' +
+            '  border-radius: 6px;' +
+            '}';
+
+        if (typeof GM_addStyle !== 'undefined') {
+            GM_addStyle(css);
+        } else {
+            var style = document.createElement('style');
+            style.textContent = css;
+            document.head.appendChild(style);
+        }
+    }
+
+    // ==================== 页面套餐高亮 ====================
+    // 点击页面上对应的套餐 tab（月/季/年）
+    function clickPagePackageTab() {
+        var pkgType = getSelectedPackageType();
+        var tabIndex;
+        switch (pkgType) {
+            case 'month':   tabIndex = 0; break;
+            case 'quarter': tabIndex = 1; break;
+            case 'year':    tabIndex = 2; break;
+            default:        tabIndex = 1;
+        }
+        var tabItems = document.querySelectorAll('.switch-tab-box .switch-tab-item');
+        if (tabItems.length > tabIndex) {
+            var targetTab = tabItems[tabIndex];
+            if (targetTab && !targetTab.classList.contains('active')) {
+                targetTab.click();
+            }
+        }
+    }
+
+    // 高亮页面上当前选择的档位卡片（Lite=0, Pro=1, Max=2）
+    function highlightPackageCard() {
+        var tier = getSelectedTier();
+        var idx;
+        switch (tier) {
+            case 'lite': idx = 0; break;
+            case 'pro':  idx = 1; break;
+            case 'max':  idx = 2; break;
+            default:     idx = 2;
+        }
+        var cards = document.querySelectorAll('.package-card-box');
+        cards.forEach(function (card, i) {
+            if (i === idx) {
+                card.classList.add('auto-buy-selected');
+            } else {
+                card.classList.remove('auto-buy-selected');
+            }
+        });
+    }
+
+    // 高亮页面上当前选择的套餐 tab
+    function highlightPackageTab() {
+        var pkgType = getSelectedPackageType();
+        var tabIndex;
+        switch (pkgType) {
+            case 'month':   tabIndex = 0; break;
+            case 'quarter': tabIndex = 1; break;
+            case 'year':    tabIndex = 2; break;
+            default:        tabIndex = 1;
+        }
+        var tabItems = document.querySelectorAll('.switch-tab-box .switch-tab-item');
+        tabItems.forEach(function (item, i) {
+            if (i === tabIndex) {
+                item.classList.add('auto-buy-pkg-selected');
+            } else {
+                item.classList.remove('auto-buy-pkg-selected');
+            }
+        });
+    }
+
+    // ==================== 激活页面购买按钮 ====================
+    // 修改 Vue 组件的产品数据，让页面上所有"已售罄"的按钮变为可点击
+    function activatePageButtons() {
+        function tryActivate() {
+            var claudeBox = document.querySelector('.claude-code-box');
+            var vue = claudeBox && claudeBox.__vue__;
+            if (!vue || !Array.isArray(vue.allCardDataList) || vue.allCardDataList.length === 0) {
+                setTimeout(tryActivate, 300);
+                return;
+            }
+            vue.allCardDataList.forEach(function (item) {
+                item.soldOut = false;
+                item.canPurchase = true;
+                item.disabled = false;
+            });
+            win.vueApp = vue;
+            log('页面', '已激活所有购买按钮（soldOut=false）');
+
+            // 初始化高亮
+            highlightPackageCard();
             clickPagePackageTab();
-            var preBuyBtns = $('button.el-button.el-tooltip.buy-btn.el-button--primary');
-            var preIdx = parseInt(document.querySelector('input[name="buy-btn"]:checked')?.value) || 0;
-            preBuyBtns.eq(preIdx).click();
-            console.log('[预解题] 已点击购买按钮，等待验证码弹出');
+            highlightPackageTab();
+            // 点击tab后等待卡片更新再高亮一次
+            setTimeout(highlightPackageCard, 600);
         }
-        // 预解题：验证码弹出后 OCR 识别 + 点击汉字（不确认）
-        if (secs <= 20 && secs > 0 && isCaptchaVisible() && !captchaPreSolved && !captchaHandling) {
-            preSolveCaptcha();
-        }
-        // 轮询加速：1s 内切 50ms 精确卡点
-        var interval = secs <= 1 ? 50 : 1000;
-        timer = setTimeout(autoPay, interval);
-        return;
+        setTimeout(tryActivate, 500);
     }
 
-    // 到点：停止预热
-    stopConnectionPreheat();
-
-    // 清除倒计时显示
-    win.__autoBuyShowCountdown && win.__autoBuyShowCountdown('');
-    win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('抢购中');
-
-    // ── 到点后先切换套餐 tab ──
-    clickPagePackageTab();
-
-    // ★ 预解题确认：验证码已预解，到点只需点确认
-    if (captchaPreSolved && isCaptchaVisible()) {
-        removePreSolveHint();
-        clickCaptchaConfirm();
-        lastPreviewResult = null;
-        captchaPreSolved = false;
-        console.log('[预解题] 到点！点击确认');
-        win.__autoBuyUpdateUI && win.__autoBuyUpdateUI('确认中');
-        timer = setTimeout(autoPay, 50);
-        return;
-    }
-
-    // 到点后：如果验证码已弹出，优先识别；否则点击购买按钮
-    if (isCaptchaVisible()) {
-        handleCaptcha();
-        timer = setTimeout(autoPay, 50);
-        return;
-    }
-
-    var buyBtns = $('button.el-button.el-tooltip.buy-btn.el-button--primary');
-    var idx = parseInt(document.querySelector('input[name="buy-btn"]:checked')?.value) || 0;
-    buyBtns.eq(idx).click();
-    // 重置拦截器结果，等待新一轮 API 响应
-    lastPreviewResult = null;
-    timer = setTimeout(autoPay, 50);
-}
-
-function scheduleNext() {
-    clearTimeout(timer);
-    timer = setTimeout(autoPay, 300);
-}
-
-// ==================== 启动 ====================
-function init() {
-    if (inCaptchaFrame) return;
-    // 检查并修正邀请码
-    checkAndFixInvitationCode();
-
-    // 安装 API 拦截器（拦截 /biz/pay/preview 响应）
-    setupAPIInterceptor();
-
-    createControlPanel();
-    // createCaptchaPanel(); // 去掉这个按钮，有歧义
-    loadQRLibrary();
-    syncServerTime();
-    scheduleNext();
-    // 延迟检查页面高度
-    setTimeout(checkPageHeight, 100);
-}
-
-// 检查并修正邀请码（确保URL中有正确的ic参数）
-function checkAndFixInvitationCode() {
-    // 只在 /glm-coding 页面处理
-    if (location.pathname !== '/glm-coding') return;
-
-    var currentIc = getQueryString('ic');
-    if (currentIc !== INVITATION_CODE) {
-        // 构建新的URL
-        var url = new URL(location.href);
-        url.searchParams.set('ic', INVITATION_CODE);
-        console.log('[自动抢购] 邀请码不正确，自动替换: ' + currentIc + ' → ' + INVITATION_CODE);
-        location.replace(url.toString());
-    }
-}
-
-// 检查页面高度是否足够显示二维码（最低900px）
-function checkPageHeight() {
-    var MIN_HEIGHT = 900;
-    var warned = false;
-
-    function check() {
-        var windowHeight = window.innerHeight;
-        if (windowHeight < MIN_HEIGHT && !warned) {
-            console.warn('[自动抢购] ⚠️ 页面高度不足900px(' + windowHeight + 'px)，二维码可能无法正常显示！');
-            warned = true;
-        } else if (windowHeight >= MIN_HEIGHT) {
-            warned = false;
+    // ==================== 邀请码检查 ====================
+    function checkAndFixInvitationCode() {
+        if (location.pathname !== '/glm-coding') return;
+        var currentIc = getQueryString('ic');
+        if (currentIc !== CONFIG.INVITATION_CODE) {
+            var url = new URL(location.href);
+            url.searchParams.set('ic', CONFIG.INVITATION_CODE);
+            log('初始化', '邀请码修正: ' + currentIc + ' -> ' + CONFIG.INVITATION_CODE);
+            location.replace(url.toString());
         }
     }
 
-    // 初始检查
-    check();
+    // ==================== 初始化 ====================
+    async function init() {
+        if (inCaptchaFrame) return;
+        checkAndFixInvitationCode();
+        injectStyles();
+        createControlPanel();
 
-    // 监听窗口大小变化
-    window.addEventListener('resize', check);
-}
+        log('初始化', 'v2 纯接口模式启动');
 
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-} else {
-    init();
-}
+        // 服务器时间同步
+        syncServerTime();
 
+        // 加载验证码SDK（重试3次）
+        var sdkLoaded = false;
+        for (var sdkRetry = 0; sdkRetry < 3; sdkRetry++) {
+            try {
+                await loadCaptchaScript();
+                log('初始化', '腾讯验证码SDK已加载');
+                sdkLoaded = true;
+                break;
+            } catch (e) {
+                log('初始化', '验证码SDK加载失败(第' + (sdkRetry + 1) + '次): ' + e.message);
+                if (sdkRetry < 2) await sleep(2000);
+            }
+        }
+        if (!sdkLoaded) {
+            log('初始化', '验证码SDK多次加载失败，将在抢购时继续尝试');
+        }
+
+        // 并行：获取用户信息 + 产品价格 + 检测OCR
+        var initTasks = [];
+
+        // 获取用户信息
+        initTasks.push(
+            fetchCustomerInfo().then(function (resp) {
+                if (resp.code === 200 && resp.data) {
+                    state.userInfo = resp.data;
+                    state.customerNumber = resp.data.customerNumber;
+                    state.customerName = resp.data.customerName;
+                    log('初始化', '用户: ' + resp.data.customerName + ' (' + resp.data.customerNumber + ')');
+                }
+            }).catch(function (e) {
+                log('初始化', '获取用户信息失败: ' + e.message);
+            })
+        );
+
+        // 调用 batch-preview 获取最新产品价格和库存
+        initTasks.push(
+            fetchBatchPreview({
+                invitationCode: getQueryString('ic') || CONFIG.INVITATION_CODE
+            }).then(function (resp) {
+                if (resp.code === 200 && resp.data && resp.data.productList) {
+                    updateProductsFromBatchPreview(resp.data.productList);
+                    updateProductInfo();
+                } else {
+                    log('产品', 'batch-preview 返回异常: ' + (resp.msg || resp.code));
+                }
+            }).catch(function (e) {
+                log('产品', 'batch-preview 失败: ' + e.message);
+            })
+        );
+
+        await Promise.all(initTasks);
+
+        // 检测本地OCR
+        checkLocalOcrService();
+
+        // 激活页面按钮（参考v1：把Vue组件中所有产品的 soldOut/disabled 修改为可购买状态）
+        activatePageButtons();
+
+        // 启动 token 显示刷新
+        startTokenDisplayRefresh();
+
+        log('初始化', '就绪，点击「开始抢购」启动');
+    }
+
+    // ==================== 启动 ====================
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+    win.win2 = window;
 })(unsafeWindow);
